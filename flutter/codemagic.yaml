@@ -1,0 +1,65 @@
+workflows:
+  android-apk:
+    name: RaahMitra GPS Logger (Flutter) — Android APK
+    max_build_duration: 30
+    instance_type: mac_mini_m2
+    environment:
+      flutter: stable
+    scripts:
+      - name: Generate native android/ project (not committed — CNG style, matches the RN app)
+        script: |
+          if [ ! -d android ]; then
+            flutter create --org com.raahmitra --project-name raahmitra_gps_logger --platforms android .
+          fi
+      - name: Add required permissions + background service registration
+        script: |
+          MANIFEST=android/app/src/main/AndroidManifest.xml
+          python3 - "$MANIFEST" <<'PYEOF'
+          import re, sys
+          path = sys.argv[1]
+          with open(path, 'r', encoding='utf-8') as f:
+              content = f.read()
+
+          permissions = [
+              'android.permission.ACCESS_FINE_LOCATION',
+              'android.permission.ACCESS_COARSE_LOCATION',
+              'android.permission.ACCESS_BACKGROUND_LOCATION',
+              'android.permission.FOREGROUND_SERVICE',
+              'android.permission.FOREGROUND_SERVICE_LOCATION',
+              'android.permission.POST_NOTIFICATIONS',
+              'android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS',
+          ]
+          perm_tags = ''.join(
+              f'    <uses-permission android:name="{p}"/>\n'
+              for p in permissions
+              if f'android:name="{p}"' not in content
+          )
+          if perm_tags:
+              content = re.sub(r'(<manifest[^>]*>)', r'\1\n' + perm_tags, content, count=1)
+
+          if 'xmlns:tools=' not in content:
+              content = re.sub(
+                  r'<manifest ',
+                  '<manifest xmlns:tools="http://schemas.android.com/tools" ',
+                  content, count=1,
+              )
+
+          service_tag = (
+              '        <service\n'
+              '            android:name="id.flutter.flutter_background_service.BackgroundService"\n'
+              '            android:foregroundServiceType="location"\n'
+              '            android:exported="false"\n'
+              '            tools:replace="android:exported" />\n'
+          )
+          if 'flutter_background_service.BackgroundService' not in content:
+              content = re.sub(r'(</application>)', service_tag + r'\1', content, count=1)
+
+          with open(path, 'w', encoding='utf-8') as f:
+              f.write(content)
+          PYEOF
+      - name: Get Flutter packages
+        script: flutter pub get
+      - name: Build APK
+        script: flutter build apk --release
+    artifacts:
+      - build/app/outputs/**/*.apk

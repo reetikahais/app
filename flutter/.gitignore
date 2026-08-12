@@ -1,0 +1,18 @@
+# generated native folders (regenerated via `flutter create .` — not committed)
+/android
+/ios
+
+# Flutter/Dart
+.dart_tool/
+.packages
+.flutter-plugin-dependencies
+build/
+.pub-cache/
+.pub/
+
+# IDE
+.idea/
+*.iml
+
+# macOS
+.DS_Store
