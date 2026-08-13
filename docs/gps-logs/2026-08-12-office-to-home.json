@@ -1,0 +1,312 @@
+{
+    "logs": [
+        {
+            "id": 13,
+            "timestamp": "2026-08-12T12:37:49.673Z",
+            "latitude": 31.0954549,
+            "longitude": 77.154077,
+            "accuracy": 14.02299976348877,
+            "battery": 73,
+            "app_state": "foreground",
+            "method": "fused",
+            "location": "31.0954549,77.154077"
+        },
+        {
+            "id": 14,
+            "timestamp": "2026-08-12T12:37:52.404Z",
+            "latitude": 31.0954651,
+            "longitude": 77.1541129,
+            "accuracy": 12.871999740600586,
+            "battery": 73,
+            "app_state": "foreground",
+            "method": "fused",
+            "location": "31.0954651,77.1541129"
+        },
+        {
+            "id": 15,
+            "timestamp": "2026-08-12T12:38:24.448Z",
+            "latitude": 31.0954035,
+            "longitude": 77.1541421,
+            "accuracy": 14.557000160217285,
+            "battery": 73,
+            "app_state": "background",
+            "method": "fused",
+            "location": "31.0954035,77.1541421"
+        },
+        {
+            "id": 16,
+            "timestamp": "2026-08-12T12:38:57.600Z",
+            "latitude": 31.0953344,
+            "longitude": 77.1541645,
+            "accuracy": 18.78700065612793,
+            "battery": 73,
+            "app_state": "background",
+            "method": "fused",
+            "location": "31.0953344,77.1541645"
+        },
+        {
+            "id": 17,
+            "timestamp": "2026-08-12T12:39:31.229Z",
+            "latitude": 31.0953261,
+            "longitude": 77.154284,
+            "accuracy": 16.878999710083008,
+            "battery": 73,
+            "app_state": "background",
+            "method": "fused",
+            "location": "31.0953261,77.154284"
+        },
+        {
+            "id": 18,
+            "timestamp": "2026-08-12T12:40:03.852Z",
+            "latitude": 31.0953187,
+            "longitude": 77.154204,
+            "accuracy": 18.149999618530273,
+            "battery": 73,
+            "app_state": "background",
+            "method": "fused",
+            "location": "31.0953187,77.154204"
+        },
+        {
+            "id": 19,
+            "timestamp": "2026-08-12T12:40:36.020Z",
+            "latitude": 31.0952648,
+            "longitude": 77.1543359,
+            "accuracy": 17.20800018310547,
+            "battery": 72,
+            "app_state": "background",
+            "method": "fused",
+            "location": "31.0952648,77.1543359"
+        },
+        {
+            "id": 20,
+            "timestamp": "2026-08-12T12:41:08.009Z",
+            "latitude": 31.0953341,
+            "longitude": 77.1541943,
+            "accuracy": 11.50100040435791,
+            "battery": 72,
+            "app_state": "background",
+            "method": "fused",
+            "location": "31.0953341,77.1541943"
+        },
+        {
+            "id": 21,
+            "timestamp": "2026-08-12T12:41:40.698Z",
+            "latitude": 31.095365,
+            "longitude": 77.1542314,
+            "accuracy": 12.440999984741211,
+            "battery": 72,
+            "app_state": "background",
+            "method": "fused",
+            "location": "31.095365,77.1542314"
+        },
+        {
+            "id": 22,
+            "timestamp": "2026-08-12T12:45:13.492Z",
+            "latitude": 31.095832,
+            "longitude": 77.1538513,
+            "accuracy": 25.06999969482422,
+            "battery": 72,
+            "app_state": "foreground",
+            "method": "fused",
+            "location": "31.095832,77.1538513"
+        },
+        {
+            "id": 23,
+            "timestamp": "2026-08-12T12:45:44.177Z",
+            "latitude": 31.0958953,
+            "longitude": 77.1537198,
+            "accuracy": 18.53499984741211,
+            "battery": 72,
+            "app_state": "foreground",
+            "method": "fused",
+            "location": "31.0958953,77.1537198"
+        },
+        {
+            "id": 24,
+            "timestamp": "2026-08-12T12:45:45.748Z",
+            "latitude": 31.0959867,
+            "longitude": 77.1535822,
+            "accuracy": 13.541999816894531,
+            "battery": 72,
+            "app_state": "foreground",
+            "method": "fused",
+            "location": "31.0959867,77.1535822"
+        },
+        {
+            "id": 25,
+            "timestamp": "2026-08-12T12:46:17.644Z",
+            "latitude": 31.0958346,
+            "longitude": 77.1529054,
+            "accuracy": 34.15800094604492,
+            "battery": 72,
+            "app_state": "background",
+            "method": "fused",
+            "location": "31.0958346,77.1529054"
+        },
+        {
+            "id": 26,
+            "timestamp": "2026-08-12T12:46:50.077Z",
+            "latitude": 31.0960043,
+            "longitude": 77.153234,
+            "accuracy": 31.472999572753906,
+            "battery": 72,
+            "app_state": "foreground",
+            "method": "fused",
+            "location": "31.0960043,77.153234"
+        },
+        {
+            "id": 27,
+            "timestamp": "2026-08-12T12:47:22.444Z",
+            "latitude": 31.0960935,
+            "longitude": 77.1529829,
+            "accuracy": 15.72700023651123,
+            "battery": 72,
+            "app_state": "foreground",
+            "method": "fused",
+            "location": "31.0960935,77.1529829"
+        },
+        {
+            "id": 28,
+            "timestamp": "2026-08-12T12:47:54.551Z",
+            "latitude": 31.0961751,
+            "longitude": 77.1528896,
+            "accuracy": 17.097000122070312,
+            "battery": 72,
+            "app_state": "background",
+            "method": "fused",
+            "location": "31.0961751,77.1528896"
+        },
+        {
+            "id": 29,
+            "timestamp": "2026-08-12T12:48:26.730Z",
+            "latitude": 31.0963646,
+            "longitude": 77.1527814,
+            "accuracy": 19.990999221801758,
+            "battery": 71,
+            "app_state": "background",
+            "method": "fused",
+            "location": "31.0963646,77.1527814"
+        },
+        {
+            "id": 30,
+            "timestamp": "2026-08-12T12:48:58.797Z",
+            "latitude": 31.0968222,
+            "longitude": 77.1529104,
+            "accuracy": 23.83099937438965,
+            "battery": 71,
+            "app_state": "background",
+            "method": "fused",
+            "location": "31.0968222,77.1529104"
+        },
+        {
+            "id": 31,
+            "timestamp": "2026-08-12T12:50:17.218Z",
+            "latitude": 31.0963069,
+            "longitude": 77.1528271,
+            "accuracy": 14.692000389099121,
+            "battery": 71,
+            "app_state": "background",
+            "method": "fused",
+            "location": "31.0963069,77.1528271"
+        },
+        {
+            "id": 32,
+            "timestamp": "2026-08-12T12:53:42.024Z",
+            "latitude": 31.0963064,
+            "longitude": 77.1528353,
+            "accuracy": 15.447999954223633,
+            "battery": 71,
+            "app_state": "background",
+            "method": "fused",
+            "location": "31.0963064,77.1528353"
+        },
+        {
+            "id": 33,
+            "timestamp": "2026-08-12T12:54:48.220Z",
+            "latitude": 31.0963195,
+            "longitude": 77.1528167,
+            "accuracy": 16.266000747680664,
+            "battery": 71,
+            "app_state": "foreground",
+            "method": "fused",
+            "location": "31.0963195,77.1528167"
+        },
+        {
+            "id": 34,
+            "timestamp": "2026-08-12T12:55:20.647Z",
+            "latitude": 31.0963133,
+            "longitude": 77.152832,
+            "accuracy": 17.29400062561035,
+            "battery": 71,
+            "app_state": "foreground",
+            "method": "fused",
+            "location": "31.0963133,77.152832"
+        },
+        {
+            "id": 35,
+            "timestamp": "2026-08-12T12:55:53.275Z",
+            "latitude": 31.0963151,
+            "longitude": 77.1528202,
+            "accuracy": 16.950000762939453,
+            "battery": 71,
+            "app_state": "foreground",
+            "method": "fused",
+            "location": "31.0963151,77.1528202"
+        },
+        {
+            "id": 36,
+            "timestamp": "2026-08-12T12:56:25.818Z",
+            "latitude": 31.0963039,
+            "longitude": 77.15283,
+            "accuracy": 15.755999565124512,
+            "battery": 71,
+            "app_state": "foreground",
+            "method": "fused",
+            "location": "31.0963039,77.15283"
+        },
+        {
+            "id": 37,
+            "timestamp": "2026-08-12T12:56:57.734Z",
+            "latitude": 31.0963096,
+            "longitude": 77.1528205,
+            "accuracy": 15.378000259399414,
+            "battery": 71,
+            "app_state": "background",
+            "method": "fused",
+            "location": "31.0963096,77.1528205"
+        },
+        {
+            "id": 38,
+            "timestamp": "2026-08-12T12:57:29.745Z",
+            "latitude": 31.096311,
+            "longitude": 77.1528206,
+            "accuracy": 15.656999588012695,
+            "battery": 71,
+            "app_state": "background",
+            "method": "fused",
+            "location": "31.096311,77.1528206"
+        },
+        {
+            "id": 39,
+            "timestamp": "2026-08-12T12:58:17.212Z",
+            "latitude": 31.0963176,
+            "longitude": 77.1528165,
+            "accuracy": 15.423999786376953,
+            "battery": 70,
+            "app_state": "background",
+            "method": "fused",
+            "location": "31.0963176,77.1528165"
+        },
+        {
+            "id": 40,
+            "timestamp": "2026-08-12T12:58:44.380Z",
+            "latitude": 31.0963376,
+            "longitude": 77.1528196,
+            "accuracy": 16.927000045776367,
+            "battery": 70,
+            "app_state": "background",
+            "method": "fused",
+            "location": "31.0963376,77.1528196"
+        }
+    ]
+}
