@@ -17,24 +17,37 @@ export function getDb() {
           method TEXT
         );
       `);
+      const columns = await db.getAllAsync('PRAGMA table_info(logs)');
+      if (!columns.some((col) => col.name === 'location')) {
+        await db.execAsync('ALTER TABLE logs ADD COLUMN location TEXT;');
+      }
       return db;
     });
   }
   return dbPromise;
 }
 
-export function getDbFileUri() {
-  const path = `${SQLite.defaultDatabaseDirectory.replace(/\/*$/, '')}/gps_log.db`;
-  return path.startsWith('file://') ? path : `file://${path}`;
-}
-
 export async function insertLog(row) {
   const db = await getDb();
   await db.runAsync(
-    `INSERT INTO logs (timestamp, latitude, longitude, accuracy, battery, app_state, method)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    [row.timestamp, row.latitude, row.longitude, row.accuracy, row.battery, row.app_state, row.method]
+    `INSERT INTO logs (timestamp, latitude, longitude, accuracy, battery, app_state, method, location)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      row.timestamp,
+      row.latitude,
+      row.longitude,
+      row.accuracy,
+      row.battery,
+      row.app_state,
+      row.method,
+      row.latitude != null && row.longitude != null ? `${row.latitude},${row.longitude}` : null,
+    ]
   );
+}
+
+export async function getAllLogs() {
+  const db = await getDb();
+  return db.getAllAsync('SELECT * FROM logs ORDER BY id');
 }
 
 export async function countLogs() {

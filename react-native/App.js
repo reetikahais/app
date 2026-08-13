@@ -3,15 +3,16 @@ import { Alert, AppState, Button, StyleSheet, Text, View } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import * as Location from 'expo-location';
 import * as Sharing from 'expo-sharing';
+import { File, Paths } from 'expo-file-system';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { LOCATION_TASK_NAME, APP_STATE_KEY, LOG_INTERVAL_MS } from './locationTask';
-import { countLogs, getDbFileUri, clearLogs } from './db';
+import { countLogs, clearLogs, getAllLogs } from './db';
 import {
   logEvent,
   recordHeartbeat,
   checkForMissedShutdown,
-  getEventsLogFileUri,
   clearEventsLog,
+  getAllEvents,
 } from './logger';
 
 export default function App() {
@@ -77,13 +78,20 @@ export default function App() {
         Alert.alert('Export failed', 'Sharing is not available on this device.');
         return;
       }
-      await Sharing.shareAsync(getDbFileUri());
-      const eventsUri = getEventsLogFileUri();
-      if (eventsUri) {
-        await Sharing.shareAsync(eventsUri);
-      } else {
-        Alert.alert('Exported', 'events.log does not exist yet — shared the database only.');
-      }
+
+      const [logs, events] = await Promise.all([getAllLogs(), getAllEvents()]);
+      const payload = {
+        exported_at: new Date().toISOString(),
+        logs,
+        events,
+      };
+
+      const file = new File(Paths.document, 'raahmitra_export.json');
+      if (file.exists) file.delete();
+      file.create();
+      file.write(JSON.stringify(payload, null, 2));
+
+      await Sharing.shareAsync(file.uri);
     } catch (err) {
       console.error('Export failed', err);
       Alert.alert('Export failed', String(err?.message ?? err));

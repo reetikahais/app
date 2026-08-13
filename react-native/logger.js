@@ -8,16 +8,6 @@ const HEARTBEAT_KEY = 'last_heartbeat';
 const LIFECYCLE_KEY = 'last_lifecycle_event';
 const KILL_GAP_MULTIPLIER = 2;
 
-export function getEventsLogFileUri() {
-  try {
-    const file = new File(Paths.document, EVENTS_LOG_FILENAME);
-    return file.exists ? file.uri : null;
-  } catch (err) {
-    console.error('getEventsLogFileUri failed', err);
-    return null;
-  }
-}
-
 export function clearEventsLog() {
   try {
     const file = new File(Paths.document, EVENTS_LOG_FILENAME);
@@ -55,6 +45,28 @@ export async function logEvent(eventType, metadata = {}) {
     file.write(line + '\n', { append: true });
   } catch (err) {
     console.error('logEvent failed', err);
+  }
+}
+
+export async function getAllEvents() {
+  try {
+    const file = new File(Paths.document, EVENTS_LOG_FILENAME);
+    if (!file.exists) return [];
+    const text = await file.text();
+    return text
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => {
+        try {
+          return JSON.parse(line);
+        } catch {
+          return null;
+        }
+      })
+      .filter(Boolean);
+  } catch (err) {
+    console.error('getAllEvents failed', err);
+    return [];
   }
 }
 

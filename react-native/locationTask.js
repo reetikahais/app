@@ -17,23 +17,31 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
   if (!data) return;
 
   const { locations } = data;
-  const location = locations?.[0];
   const appState = (await AsyncStorage.getItem(APP_STATE_KEY)) ?? 'background';
-  const batteryLevel = await Battery.getBatteryLevelAsync();
 
-  await insertLog({
-    timestamp: new Date().toISOString(),
-    latitude: location?.coords?.latitude ?? null,
-    longitude: location?.coords?.longitude ?? null,
-    accuracy: location?.coords?.accuracy ?? null,
-    battery: Math.round(batteryLevel * 100),
-    app_state: appState,
-    method: 'fused',
-  });
+  if (locations?.length) {
+    const batteryLevel = await Battery.getBatteryLevelAsync();
 
-  await logEvent('location_task_fired', {
-    latitude: location?.coords?.latitude ?? null,
-    longitude: location?.coords?.longitude ?? null,
-  });
+    for (const location of locations) {
+      const fixTime = new Date(location.timestamp);
+      await insertLog({
+        timestamp: Number.isNaN(fixTime.getTime()) ? new Date().toISOString() : fixTime.toISOString(),
+        latitude: location?.coords?.latitude ?? null,
+        longitude: location?.coords?.longitude ?? null,
+        accuracy: location?.coords?.accuracy ?? null,
+        battery: Math.round(batteryLevel * 100),
+        app_state: appState,
+        method: 'fused',
+      });
+    }
+
+    const last = locations[locations.length - 1];
+    await logEvent('location_task_fired', {
+      batch_size: locations.length,
+      latitude: last?.coords?.latitude ?? null,
+      longitude: last?.coords?.longitude ?? null,
+    });
+  }
+
   await recordHeartbeat();
 });
