@@ -72,11 +72,20 @@ class _LoggerHomeState extends State<LoggerHome> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _setAppState('foreground');
+    _syncRunningState();
 
     FlutterBackgroundService().on('update').listen((event) {
       if (event == null) return;
       setState(() => _count = event['count'] as int);
     });
+  }
+
+  // _running is in-memory only and resets to false on every relaunch — if the
+  // service is still alive from before the app was killed/swiped away, ask
+  // the OS for the real state instead of assuming stopped.
+  Future<void> _syncRunningState() async {
+    final running = await FlutterBackgroundService().isRunning();
+    if (mounted) setState(() => _running = running);
   }
 
   @override
