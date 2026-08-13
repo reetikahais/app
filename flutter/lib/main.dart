@@ -98,18 +98,32 @@ class _LoggerHomeState extends State<LoggerHome> with WidgetsBindingObserver {
   }
 
   Future<void> _start() async {
-    await requestPermissions();
-    await FlutterBackgroundService().startService();
-    await recordHeartbeat('start_tracking');
-    await logEvent('start_tracking', {'reason': 'user_action'});
-    setState(() => _running = true);
+    try {
+      await requestPermissions();
+      await FlutterBackgroundService().startService();
+      await recordHeartbeat('start_tracking');
+      await logEvent('start_tracking', {'reason': 'user_action'});
+      setState(() => _running = true);
+    } catch (err) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Start failed: $err')),
+      );
+    }
   }
 
   Future<void> _stop() async {
-    FlutterBackgroundService().invoke('stopService');
-    await recordHeartbeat('stop_tracking');
-    await logEvent('stop_tracking', {'reason': 'user_action'});
-    setState(() => _running = false);
+    try {
+      FlutterBackgroundService().invoke('stopService');
+      await recordHeartbeat('stop_tracking');
+      await logEvent('stop_tracking', {'reason': 'user_action'});
+      setState(() => _running = false);
+    } catch (err) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Stop failed: $err')),
+      );
+    }
   }
 
   Future<void> _exportLogs() async {
