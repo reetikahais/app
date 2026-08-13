@@ -57,6 +57,41 @@ workflows:
           with open(path, 'w', encoding='utf-8') as f:
               f.write(content)
           PYEOF
+      - name: Enable core library desugaring (flutter_local_notifications requirement)
+        script: |
+          GRADLE_KTS=android/app/build.gradle.kts
+          GRADLE_GROOVY=android/app/build.gradle
+          if [ -f "$GRADLE_KTS" ]; then
+            GRADLE_FILE="$GRADLE_KTS"
+            KOTLIN=1
+          else
+            GRADLE_FILE="$GRADLE_GROOVY"
+            KOTLIN=0
+          fi
+          python3 - "$GRADLE_FILE" "$KOTLIN" <<'PYEOF'
+          import re, sys
+          path, kotlin = sys.argv[1], sys.argv[2] == '1'
+          with open(path, 'r', encoding='utf-8') as f:
+              content = f.read()
+
+          if 'isCoreLibraryDesugaringEnabled' not in content and 'coreLibraryDesugaringEnabled' not in content:
+              flag = '        isCoreLibraryDesugaringEnabled = true\n' if kotlin else '        coreLibraryDesugaringEnabled true\n'
+              content = re.sub(r'(compileOptions\s*\{\n)', r'\1' + flag, content, count=1)
+
+          dep_line = (
+              '    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")\n'
+              if kotlin else
+              "    coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.1.4'\n"
+          )
+          if 'desugar_jdk_libs' not in content:
+              if re.search(r'dependencies\s*\{', content):
+                  content = re.sub(r'(dependencies\s*\{\n)', r'\1' + dep_line, content, count=1)
+              else:
+                  content += '\ndependencies {\n' + dep_line + '}\n'
+
+          with open(path, 'w', encoding='utf-8') as f:
+              f.write(content)
+          PYEOF
       - name: Get Flutter packages
         script: flutter pub get
       - name: Build APK
