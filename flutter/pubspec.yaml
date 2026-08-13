@@ -11,6 +11,7 @@ dependencies:
     sdk: flutter
   flutter_background_service: ^5.0.10
   flutter_background_service_android: ^6.2.6
+  flutter_local_notifications: ^17.2.3
   geolocator: ^11.0.0
   battery_plus: ^7.1.1
   sqflite: ^2.3.3

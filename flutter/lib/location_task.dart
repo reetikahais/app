@@ -4,6 +4,7 @@ import 'dart:ui';
 import 'package:battery_plus/battery_plus.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:flutter_background_service_android/flutter_background_service_android.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sqflite/sqflite.dart';
@@ -78,7 +79,29 @@ void onServiceStart(ServiceInstance service) async {
   });
 }
 
+// flutter_background_service names the notification channel via
+// AndroidConfiguration.notificationChannelId but never creates it — startForeground()
+// then throws "invalid channel for service notification" (RuntimeException, fatal on the
+// OS side). Create the channel ourselves before configure() ever runs.
+Future<void> _ensureNotificationChannel() async {
+  final plugin = FlutterLocalNotificationsPlugin();
+  await plugin.initialize(
+    const InitializationSettings(
+      android: AndroidInitializationSettings('@mipmap/ic_launcher'),
+    ),
+  );
+  await plugin
+      .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()
+      ?.createNotificationChannel(const AndroidNotificationChannel(
+        notificationChannelId,
+        'RaahMitra GPS Logger',
+        description: 'Foreground notification for the GPS logging service',
+        importance: Importance.low,
+      ));
+}
+
 Future<void> initializeService() async {
+  await _ensureNotificationChannel();
   final service = FlutterBackgroundService();
   await service.configure(
     androidConfiguration: AndroidConfiguration(
