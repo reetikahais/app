@@ -11,7 +11,7 @@ Future<Database> openLogDb() async {
   final dbPath = await _dbFilePath();
   return openDatabase(
     dbPath,
-    version: 1,
+    version: 2,
     onCreate: (db, version) => db.execute('''
       CREATE TABLE logs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -21,9 +21,15 @@ Future<Database> openLogDb() async {
         accuracy REAL,
         battery INTEGER,
         app_state TEXT,
-        method TEXT
+        method TEXT,
+        location TEXT
       )
     '''),
+    onUpgrade: (db, oldVersion, newVersion) async {
+      if (oldVersion < 2) {
+        await db.execute('ALTER TABLE logs ADD COLUMN location TEXT');
+      }
+    },
   );
 }
 
@@ -32,7 +38,9 @@ Future<int> countLogs(Database db) async {
   return (result.first['count'] as int?) ?? 0;
 }
 
-Future<String> getDbFilePath() => _dbFilePath();
+Future<List<Map<String, Object?>>> getAllLogs(Database db) {
+  return db.query('logs', orderBy: 'id');
+}
 
 Future<void> clearLogs(Database db) async {
   await db.delete('logs');

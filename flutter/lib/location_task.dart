@@ -37,13 +37,14 @@ Future<void> _logOnce(Database db) async {
   }
 
   await db.insert('logs', {
-    'timestamp': DateTime.now().toIso8601String(),
+    'timestamp': (position?.timestamp ?? DateTime.now()).toIso8601String(),
     'latitude': position?.latitude,
     'longitude': position?.longitude,
     'accuracy': position?.accuracy,
     'battery': batteryLevel,
     'app_state': appState,
     'method': 'fused',
+    'location': position != null ? '${position.latitude},${position.longitude}' : null,
   });
 
   await logEvent('location_task_fired', {

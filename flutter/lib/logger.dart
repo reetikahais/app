@@ -17,9 +17,26 @@ Future<File> _eventsLogFile() async {
   return File(p.join(dir.path, eventsLogFilename));
 }
 
-Future<String?> getEventsLogFilePath() async {
-  final file = await _eventsLogFile();
-  return file.existsSync() ? file.path : null;
+Future<List<Map<String, dynamic>>> getAllEvents() async {
+  try {
+    final file = await _eventsLogFile();
+    if (!file.existsSync()) return [];
+    final lines = await file.readAsLines();
+    final events = <Map<String, dynamic>>[];
+    for (final line in lines) {
+      if (line.isEmpty) continue;
+      try {
+        events.add(jsonDecode(line) as Map<String, dynamic>);
+      } catch (_) {
+        // skip malformed line
+      }
+    }
+    return events;
+  } catch (err) {
+    // ignore: avoid_print
+    print('getAllEvents failed: $err');
+    return [];
+  }
 }
 
 Future<void> clearEventsLog() async {

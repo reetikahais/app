@@ -1,8 +1,12 @@
+import 'dart:convert';
+import 'dart:io';
 import 'dart:ui';
 
 import 'package:cross_file/cross_file.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -108,23 +112,23 @@ class _LoggerHomeState extends State<LoggerHome> with WidgetsBindingObserver {
 
   Future<void> _exportLogs() async {
     try {
-      final dbPath = await getDbFilePath();
-      final eventsPath = await getEventsLogFilePath();
+      final db = await openLogDb();
+      final logs = await getAllLogs(db);
+      final events = await getAllEvents();
 
-      final files = [XFile(dbPath)];
-      if (eventsPath != null) {
-        files.add(XFile(eventsPath));
-      }
+      final payload = {
+        'exported_at': DateTime.now().toIso8601String(),
+        'logs': logs,
+        'events': events,
+      };
 
-      await SharePlus.instance.share(ShareParams(files: files));
+      final dir = await getApplicationDocumentsDirectory();
+      final exportFile = File(p.join(dir.path, 'raahmitra_export.json'));
+      await exportFile.writeAsString(
+        const JsonEncoder.withIndent('  ').convert(payload),
+      );
 
-      if (eventsPath == null && mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('events.log does not exist yet — shared the database only.'),
-          ),
-        );
-      }
+      await SharePlus.instance.share(ShareParams(files: [XFile(exportFile.path)]));
     } catch (err) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
