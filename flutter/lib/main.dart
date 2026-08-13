@@ -101,12 +101,14 @@ class _LoggerHomeState extends State<LoggerHome> with WidgetsBindingObserver {
     await requestPermissions();
     await FlutterBackgroundService().startService();
     await recordHeartbeat('start_tracking');
+    await logEvent('start_tracking', {'reason': 'user_action'});
     setState(() => _running = true);
   }
 
   Future<void> _stop() async {
     FlutterBackgroundService().invoke('stopService');
     await recordHeartbeat('stop_tracking');
+    await logEvent('stop_tracking', {'reason': 'user_action'});
     setState(() => _running = false);
   }
 
