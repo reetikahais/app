@@ -125,7 +125,7 @@ class _LoggerHomeState extends State<LoggerHome> with WidgetsBindingObserver {
       };
 
       final dir = await getApplicationDocumentsDirectory();
-      final exportFile = File(p.join(dir.path, 'raahmitra_export.json'));
+      final exportFile = File(p.join(dir.path, 'raahmitra_flutter_export.json'));
       await exportFile.writeAsString(
         const JsonEncoder.withIndent('  ').convert(payload),
       );
