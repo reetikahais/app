@@ -16,6 +16,11 @@ import 'logger.dart';
 const String logIntervalPrefKey = 'log_interval_seconds';
 const int defaultLogIntervalSeconds = 30;
 const String notificationChannelId = 'gps_logger_channel';
+const double maxAccuracyMeters = 50;
+
+String classifyFixMethod(double? accuracy) {
+  return accuracy != null && accuracy <= maxAccuracyMeters ? 'fused' : 'low_accuracy_fallback';
+}
 
 Future<void> _logOnce(Database db) async {
   final prefs = await SharedPreferences.getInstance();
@@ -35,6 +40,7 @@ Future<void> _logOnce(Database db) async {
     try {
       position = await Geolocator.getCurrentPosition(
         desiredAccuracy: LocationAccuracy.high,
+        timeLimit: const Duration(seconds: 25),
       );
     } catch (err) {
       position = null;
@@ -51,7 +57,7 @@ Future<void> _logOnce(Database db) async {
     'accuracy': position?.accuracy,
     'battery': batteryLevel,
     'app_state': appState,
-    'method': 'fused',
+    'method': classifyFixMethod(position?.accuracy),
     'location': position != null ? '${position.latitude},${position.longitude}' : null,
     'signal_dbm': signal.signalDbm,
     'signal_level': signal.signalLevel,
