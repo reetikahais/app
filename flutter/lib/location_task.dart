@@ -76,10 +76,15 @@ void onServiceStart(ServiceInstance service) async {
   }
 
   int count = 0;
-  Timer.periodic(Duration(seconds: intervalSeconds), (timer) async {
+  final timer = Timer.periodic(Duration(seconds: intervalSeconds), (timer) async {
     await _logOnce(db);
     count++;
     service.invoke('update', {'count': count});
+  });
+
+  service.on('stopService').listen((event) {
+    timer.cancel();
+    service.stopSelf();
   });
 }
 
