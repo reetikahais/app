@@ -69,7 +69,7 @@ Future<void> _logOnce(Database db) async {
     'latitude': position?.latitude,
     'longitude': position?.longitude,
   });
-  await recordHeartbeat();
+  await recordHeartbeatAndDetectGap(signalGapThresholdMs);
 }
 
 @pragma('vm:entry-point')
@@ -88,11 +88,18 @@ void onServiceStart(ServiceInstance service) async {
     );
   }
 
+  bool ticking = false;
   int count = 0;
   final timer = Timer.periodic(Duration(seconds: intervalSeconds), (timer) async {
-    await _logOnce(db);
-    count++;
-    service.invoke('update', {'count': count});
+    if (ticking) return;
+    ticking = true;
+    try {
+      await _logOnce(db);
+      count++;
+      service.invoke('update', {'count': count});
+    } finally {
+      ticking = false;
+    }
   });
 
   service.on('stopService').listen((event) {

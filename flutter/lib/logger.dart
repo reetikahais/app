@@ -95,6 +95,37 @@ Future<void> recordHeartbeat([String? lifecycleEvent]) async {
   }
 }
 
+const int signalGapThresholdMs = 120000; // 2 min
+
+Map<String, dynamic>? computeSignalGap(int? lastHeartbeatMs, int nowMs, int thresholdMs) {
+  if (lastHeartbeatMs == null) return null;
+  final gapMs = nowMs - lastHeartbeatMs;
+  if (gapMs <= thresholdMs) return null;
+  return {
+    'gap_started_at': DateTime.fromMillisecondsSinceEpoch(lastHeartbeatMs).toUtc().toIso8601String(),
+    'gap_ended_at': DateTime.fromMillisecondsSinceEpoch(nowMs).toUtc().toIso8601String(),
+    'duration_ms': gapMs,
+  };
+}
+
+Future<void> recordHeartbeatAndDetectGap(int thresholdMs) async {
+  try {
+    final prefs = await SharedPreferences.getInstance();
+    final lastHeartbeat = prefs.getInt(heartbeatPrefKey);
+    final now = DateTime.now().millisecondsSinceEpoch;
+
+    final gap = computeSignalGap(lastHeartbeat, now, thresholdMs);
+    if (gap != null) {
+      await logEvent('signal_gap_detected', gap);
+    }
+
+    await prefs.setInt(heartbeatPrefKey, now);
+  } catch (err) {
+    // ignore: avoid_print
+    print('recordHeartbeatAndDetectGap failed: $err');
+  }
+}
+
 // Heartbeat piggybacks on the background service's per-fix write (see
 // location_task.dart) — no separate timer here, since anything owned by the
 // UI isolate stops when the app backgrounds, which is exactly the case this
