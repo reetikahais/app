@@ -43,7 +43,8 @@
           "locationAlwaysAndWhenInUsePermission": "RaahMitra GPS logger needs background location to run the reliability test."
         }
       ],
-      "expo-sharing"
+      "expo-sharing",
+      "./plugins/withSignalInfo.js"
     ],
     "extra": {
       "eas": {
