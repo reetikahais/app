@@ -81,6 +81,33 @@ export async function recordHeartbeat(lifecycleEvent) {
   }
 }
 
+export function computeSignalGap(lastHeartbeatStr, now, thresholdMs) {
+  if (!lastHeartbeatStr) return null;
+  const gapMs = now - Number(lastHeartbeatStr);
+  if (gapMs <= thresholdMs) return null;
+  return {
+    gap_started_at: new Date(Number(lastHeartbeatStr)).toISOString(),
+    gap_ended_at: new Date(now).toISOString(),
+    duration_ms: gapMs,
+  };
+}
+
+export async function recordHeartbeatAndDetectGap(thresholdMs) {
+  try {
+    const lastHeartbeatStr = await AsyncStorage.getItem(HEARTBEAT_KEY);
+    const now = Date.now();
+
+    const gap = computeSignalGap(lastHeartbeatStr, now, thresholdMs);
+    if (gap) {
+      await logEvent('signal_gap_detected', gap);
+    }
+
+    await AsyncStorage.setItem(HEARTBEAT_KEY, String(now));
+  } catch (err) {
+    console.error('recordHeartbeatAndDetectGap failed', err);
+  }
+}
+
 // Heartbeat piggybacks on locationTask's per-fix write (recordHeartbeat call there) —
 // no separate JS timer, since a JS-owned interval would get suspended when the app
 // backgrounds, which is exactly the case this needs to detect.

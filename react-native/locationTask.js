@@ -2,13 +2,14 @@ import * as TaskManager from 'expo-task-manager';
 import * as Battery from 'expo-battery';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { insertLog } from './db';
-import { logEvent, recordHeartbeat } from './logger';
+import { logEvent, recordHeartbeatAndDetectGap } from './logger';
 import { getSignalInfo } from './signalInfo';
 
 export const LOCATION_TASK_NAME = 'raahmitra-background-location-task';
 export const APP_STATE_KEY = 'app_state';
 export const LOG_INTERVAL_MS = 30000;
 export const MAX_ACCURACY_METERS = 50;
+export const SIGNAL_GAP_THRESHOLD_MS = 120000; // 2 min
 
 export function classifyFixMethod(accuracy) {
   return accuracy != null && accuracy <= MAX_ACCURACY_METERS ? 'fused' : 'low_accuracy_fallback';
@@ -56,5 +57,5 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
     });
   }
 
-  await recordHeartbeat();
+  await recordHeartbeatAndDetectGap(SIGNAL_GAP_THRESHOLD_MS);
 });
