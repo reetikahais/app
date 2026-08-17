@@ -21,4 +21,10 @@ describe('computeSignalGap', () => {
       duration_ms: 300000,
     });
   });
+
+  test('gap exactly at threshold returns null', () => {
+    const last = 1000000;
+    const now = last + 120000; // exactly 2 min, threshold 2 min
+    expect(computeSignalGap(String(last), now, 120000)).toBeNull();
+  });
 });
