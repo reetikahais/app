@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
-import { Alert, AppState, Button, StyleSheet, Text, View } from 'react-native';
+import { Alert, AppState, Button, Platform, StyleSheet, Text, View } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import * as Location from 'expo-location';
+import * as IntentLauncher from 'expo-intent-launcher';
 import * as Sharing from 'expo-sharing';
 import { File, Paths } from 'expo-file-system';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -50,6 +51,17 @@ export default function App() {
     if (fg.status !== 'granted') return;
     const bg = await Location.requestBackgroundPermissionsAsync();
     if (bg.status !== 'granted') return;
+
+    if (Platform.OS === 'android') {
+      try {
+        await IntentLauncher.startActivityAsync(
+          'android.settings.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS',
+          { data: 'package:com.raahmitra.gpslogger' }
+        );
+      } catch (err) {
+        console.error('battery optimization exemption request failed', err);
+      }
+    }
 
     await Location.startLocationUpdatesAsync(LOCATION_TASK_NAME, {
       accuracy: Location.Accuracy.High,

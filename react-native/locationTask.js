@@ -7,6 +7,7 @@ import { logEvent, recordHeartbeat } from './logger';
 export const LOCATION_TASK_NAME = 'raahmitra-background-location-task';
 export const APP_STATE_KEY = 'app_state';
 export const LOG_INTERVAL_MS = 30000;
+export const MAX_ACCURACY_METERS = 50;
 
 TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
   if (error) {
@@ -23,6 +24,12 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
     const batteryLevel = await Battery.getBatteryLevelAsync();
 
     for (const location of locations) {
+      const accuracy = location?.coords?.accuracy ?? null;
+      if (accuracy !== null && accuracy > MAX_ACCURACY_METERS) {
+        await logEvent('location_fix_discarded', { accuracy });
+        continue;
+      }
+
       const fixTime = new Date(location.timestamp);
       await insertLog({
         timestamp: Number.isNaN(fixTime.getTime()) ? new Date().toISOString() : fixTime.toISOString(),
