@@ -29,8 +29,7 @@
     "test": "jest"
   },
   "jest": {
-    "preset": "jest-expo",
-    "setupFilesAfterEnv": ["<rootDir>/jest.setup.js"]
+    "preset": "jest-expo"
   },
   "private": true
 }
