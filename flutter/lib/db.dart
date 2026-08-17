@@ -11,7 +11,7 @@ Future<Database> openLogDb() async {
   final dbPath = await _dbFilePath();
   return openDatabase(
     dbPath,
-    version: 2,
+    version: 3,
     onCreate: (db, version) => db.execute('''
       CREATE TABLE logs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -22,12 +22,22 @@ Future<Database> openLogDb() async {
         battery INTEGER,
         app_state TEXT,
         method TEXT,
-        location TEXT
+        location TEXT,
+        signal_dbm INTEGER,
+        signal_level INTEGER,
+        carrier TEXT,
+        network_type TEXT
       )
     '''),
     onUpgrade: (db, oldVersion, newVersion) async {
       if (oldVersion < 2) {
         await db.execute('ALTER TABLE logs ADD COLUMN location TEXT');
+      }
+      if (oldVersion < 3) {
+        await db.execute('ALTER TABLE logs ADD COLUMN signal_dbm INTEGER');
+        await db.execute('ALTER TABLE logs ADD COLUMN signal_level INTEGER');
+        await db.execute('ALTER TABLE logs ADD COLUMN carrier TEXT');
+        await db.execute('ALTER TABLE logs ADD COLUMN network_type TEXT');
       }
     },
   );

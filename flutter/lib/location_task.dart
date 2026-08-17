@@ -7,6 +7,7 @@ import 'package:flutter_background_service_android/flutter_background_service_an
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:signal_info/signal_info.dart';
 import 'package:sqflite/sqflite.dart';
 
 import 'db.dart';
@@ -41,6 +42,8 @@ Future<void> _logOnce(Database db) async {
     }
   }
 
+  final signal = await getSignalInfo();
+
   await db.insert('logs', {
     'timestamp': (position?.timestamp ?? DateTime.now()).toIso8601String(),
     'latitude': position?.latitude,
@@ -50,6 +53,10 @@ Future<void> _logOnce(Database db) async {
     'app_state': appState,
     'method': 'fused',
     'location': position != null ? '${position.latitude},${position.longitude}' : null,
+    'signal_dbm': signal.signalDbm,
+    'signal_level': signal.signalLevel,
+    'carrier': signal.carrier,
+    'network_type': signal.networkType,
   });
 
   await logEvent('location_task_fired', {

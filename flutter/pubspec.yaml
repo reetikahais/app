@@ -21,6 +21,8 @@ dependencies:
   shared_preferences: ^2.2.3
   share_plus: ^13.3.0
   cross_file: any
+  signal_info:
+    path: packages/signal_info
 
 dev_dependencies:
   flutter_test:

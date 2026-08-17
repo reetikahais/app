@@ -47,6 +47,7 @@ Future<void> requestPermissions() async {
   }
   await Permission.notification.request();
   await Permission.ignoreBatteryOptimizations.request();
+  await Permission.phone.request();
 }
 
 class LoggerApp extends StatelessWidget {
