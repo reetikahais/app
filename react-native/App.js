@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Alert, AppState, Button, Platform, StyleSheet, Text, View } from 'react-native';
+import { Alert, AppState, Button, PermissionsAndroid, Platform, StyleSheet, Text, View } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import * as Location from 'expo-location';
 import * as IntentLauncher from 'expo-intent-launcher';
@@ -60,6 +60,12 @@ export default function App() {
         );
       } catch (err) {
         console.error('battery optimization exemption request failed', err);
+      }
+
+      try {
+        await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.READ_PHONE_STATE);
+      } catch (err) {
+        console.error('READ_PHONE_STATE request failed', err);
       }
     }
 

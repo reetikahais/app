@@ -3,6 +3,7 @@ import * as Battery from 'expo-battery';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { insertLog } from './db';
 import { logEvent, recordHeartbeat } from './logger';
+import { getSignalInfo } from './signalInfo';
 
 export const LOCATION_TASK_NAME = 'raahmitra-background-location-task';
 export const APP_STATE_KEY = 'app_state';
@@ -22,6 +23,7 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
 
   if (locations?.length) {
     const batteryLevel = await Battery.getBatteryLevelAsync();
+    const signalInfo = await getSignalInfo();
 
     for (const location of locations) {
       const accuracy = location?.coords?.accuracy ?? null;
@@ -39,6 +41,10 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
         battery: Math.round(batteryLevel * 100),
         app_state: appState,
         method: 'fused',
+        signal_dbm: signalInfo.signal_dbm,
+        signal_level: signalInfo.signal_level,
+        carrier: signalInfo.carrier,
+        network_type: signalInfo.network_type,
       });
     }
 

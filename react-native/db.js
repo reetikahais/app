@@ -18,9 +18,17 @@ export function getDb() {
         );
       `);
       const columns = await db.getAllAsync('PRAGMA table_info(logs)');
-      if (!columns.some((col) => col.name === 'location')) {
-        await db.execAsync('ALTER TABLE logs ADD COLUMN location TEXT;');
-      }
+      const existing = new Set(columns.map((col) => col.name));
+      const addColumn = async (name, type) => {
+        if (!existing.has(name)) {
+          await db.execAsync(`ALTER TABLE logs ADD COLUMN ${name} ${type};`);
+        }
+      };
+      await addColumn('location', 'TEXT');
+      await addColumn('signal_dbm', 'INTEGER');
+      await addColumn('signal_level', 'INTEGER');
+      await addColumn('carrier', 'TEXT');
+      await addColumn('network_type', 'TEXT');
       return db;
     });
   }
@@ -30,8 +38,8 @@ export function getDb() {
 export async function insertLog(row) {
   const db = await getDb();
   await db.runAsync(
-    `INSERT INTO logs (timestamp, latitude, longitude, accuracy, battery, app_state, method, location)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO logs (timestamp, latitude, longitude, accuracy, battery, app_state, method, location, signal_dbm, signal_level, carrier, network_type)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       row.timestamp,
       row.latitude,
@@ -41,6 +49,10 @@ export async function insertLog(row) {
       row.app_state,
       row.method,
       row.latitude != null && row.longitude != null ? `${row.latitude},${row.longitude}` : null,
+      row.signal_dbm ?? null,
+      row.signal_level ?? null,
+      row.carrier ?? null,
+      row.network_type ?? null,
     ]
   );
 }
