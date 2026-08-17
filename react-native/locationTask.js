@@ -10,6 +10,10 @@ export const APP_STATE_KEY = 'app_state';
 export const LOG_INTERVAL_MS = 30000;
 export const MAX_ACCURACY_METERS = 50;
 
+export function classifyFixMethod(accuracy) {
+  return accuracy != null && accuracy <= MAX_ACCURACY_METERS ? 'fused' : 'low_accuracy_fallback';
+}
+
 TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
   if (error) {
     console.error('Location task error', error);
@@ -27,10 +31,6 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
 
     for (const location of locations) {
       const accuracy = location?.coords?.accuracy ?? null;
-      if (accuracy !== null && accuracy > MAX_ACCURACY_METERS) {
-        await logEvent('location_fix_discarded', { accuracy });
-        continue;
-      }
 
       const fixTime = new Date(location.timestamp);
       await insertLog({
@@ -40,7 +40,7 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
         accuracy: location?.coords?.accuracy ?? null,
         battery: Math.round(batteryLevel * 100),
         app_state: appState,
-        method: 'fused',
+        method: classifyFixMethod(accuracy),
         signal_dbm: signalInfo.signal_dbm,
         signal_level: signalInfo.signal_level,
         carrier: signalInfo.carrier,
