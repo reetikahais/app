@@ -39,7 +39,12 @@ void main() async {
 }
 
 Future<void> requestPermissions() async {
-  await Permission.locationAlways.request();
+  // Android 11+ auto-denies locationAlways if requested before foreground
+  // location is granted — must request in this order.
+  final foreground = await Permission.locationWhenInUse.request();
+  if (foreground.isGranted) {
+    await Permission.locationAlways.request();
+  }
   await Permission.notification.request();
   await Permission.ignoreBatteryOptimizations.request();
 }

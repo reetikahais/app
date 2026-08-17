@@ -28,13 +28,17 @@ Future<void> _logOnce(Database db) async {
   }
 
   Position? position;
-  try {
-    position = await Geolocator.getCurrentPosition(
-      desiredAccuracy: LocationAccuracy.high,
-    );
-  } catch (err) {
-    position = null;
-    await logEvent('error', {'reason': 'location_task_error', 'message': err.toString()});
+  if (!await Geolocator.isLocationServiceEnabled()) {
+    await logEvent('error', {'reason': 'location_services_disabled'});
+  } else {
+    try {
+      position = await Geolocator.getCurrentPosition(
+        desiredAccuracy: LocationAccuracy.high,
+      );
+    } catch (err) {
+      position = null;
+      await logEvent('error', {'reason': 'location_task_error', 'message': err.toString()});
+    }
   }
 
   await db.insert('logs', {
