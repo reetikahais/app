@@ -115,7 +115,7 @@ Create `flutter/test/logger_test.dart`:
 
 ```dart
 import 'package:flutter_test/flutter_test.dart';
-import 'package:raahmitra_flutter_gps_logger/logger.dart';
+import 'package:raahmitra_gps_logger/logger.dart';
 
 void main() {
   group('computeSignalGap', () {
@@ -208,12 +208,36 @@ In `flutter/lib/location_task.dart`, replace the final line of `_logOnce` (curre
 
 `recordHeartbeat` and `recordHeartbeatAndDetectGap` are both exported from `logger.dart` via the existing `import 'logger.dart';` at the top of `location_task.dart` — no import line changes needed (Dart doesn't use named import lists like the RN version did). Do not modify `main.dart` — it still calls plain `recordHeartbeat('start_tracking')` / `recordHeartbeat('stop_tracking')`.
 
-- [ ] **Step 6: Run full test suite**
+- [ ] **Step 6: Add a re-entrancy guard around `_logOnce`**
+
+Code-quality review of Task 1 flagged a real risk: `Timer.periodic` does not wait for the previous callback's `Future` to resolve before scheduling the next tick, so a slow `_logOnce` call (GPS timeout up to 25s, plus battery/signal/db calls, against a 30s tick interval) can overlap with the next tick — two concurrent runs would race the heartbeat read-modify-write that `recordHeartbeatAndDetectGap` just introduced, corrupting gap detection.
+
+In `flutter/lib/location_task.dart`, inside `onServiceStart` (find the current `Timer.periodic` block), add an in-flight guard:
+
+```dart
+  bool ticking = false;
+  int count = 0;
+  final timer = Timer.periodic(Duration(seconds: intervalSeconds), (timer) async {
+    if (ticking) return;
+    ticking = true;
+    try {
+      await _logOnce(db);
+      count++;
+      service.invoke('update', {'count': count});
+    } finally {
+      ticking = false;
+    }
+  });
+```
+
+This replaces the existing `Timer.periodic` block's body (currently just `await _logOnce(db); count++; service.invoke('update', {'count': count});` with no guard) — read the current file first to match the exact surrounding code, since `count` is already declared above the timer in the existing file; don't declare it twice.
+
+- [ ] **Step 7: Run full test suite**
 
 Run: `cd flutter && flutter test`
-Expected: PASS (all tests — location_task_test.dart, logger_test.dart).
+Expected: PASS (all tests — location_task_test.dart, logger_test.dart). Note: the re-entrancy guard has no dedicated unit test (it's a timing/concurrency property of a `Timer.periodic` callback, not practically unit-testable without a fake clock/timer harness, which is out of scope for this plan) — verify it by reading the code, not by a new test.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add flutter/lib/logger.dart flutter/lib/location_task.dart flutter/test/logger_test.dart
