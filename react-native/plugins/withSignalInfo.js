@@ -35,7 +35,8 @@ class SignalInfoModule(reactContext: ReactApplicationContext) :
         return
       }
 
-      result.putString("carrier", tm.networkOperatorName)
+      val carrier = tm.simOperatorName.takeIf { it.isNotEmpty() } ?: tm.networkOperatorName
+      result.putString("carrier", carrier)
 
       val hasPhoneState = ContextCompat.checkSelfPermission(
         reactApplicationContext,
