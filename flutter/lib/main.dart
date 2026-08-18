@@ -12,8 +12,11 @@ import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'db.dart';
+import 'debouncer.dart';
 import 'location_task.dart';
 import 'logger.dart';
+
+const Duration lifecycleDebounceDelay = Duration(milliseconds: 300);
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -72,6 +75,7 @@ class LoggerHome extends StatefulWidget {
 class _LoggerHomeState extends State<LoggerHome> with WidgetsBindingObserver {
   int _count = 0;
   bool _running = false;
+  final _lifecycleDebouncer = Debouncer(lifecycleDebounceDelay);
 
   @override
   void initState() {
@@ -97,14 +101,17 @@ class _LoggerHomeState extends State<LoggerHome> with WidgetsBindingObserver {
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _lifecycleDebouncer.cancel();
     super.dispose();
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     final next = state == AppLifecycleState.resumed ? 'foreground' : 'background';
-    _setAppState(next);
-    logEvent(next == 'foreground' ? 'app_foreground' : 'app_background');
+    _lifecycleDebouncer.run(() {
+      _setAppState(next);
+      logEvent(next == 'foreground' ? 'app_foreground' : 'app_background');
+    });
   }
 
   Future<void> _setAppState(String value) async {

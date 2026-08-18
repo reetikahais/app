@@ -6,7 +6,14 @@ import * as IntentLauncher from 'expo-intent-launcher';
 import * as Sharing from 'expo-sharing';
 import { File, Paths } from 'expo-file-system';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { LOCATION_TASK_NAME, APP_STATE_KEY, LOG_INTERVAL_MS } from './locationTask';
+import {
+  LOCATION_TASK_NAME,
+  APP_STATE_KEY,
+  LOG_INTERVAL_MS,
+  DESIRED_INTERVAL_KEY,
+  DESIRED_HIGH_ACCURACY_KEY,
+} from './locationTask';
+import { startWatch, stopWatch, restartWatchWithOptions } from './locationWatch';
 import { countLogs, clearLogs, getAllLogs } from './db';
 import {
   logEvent,
@@ -15,33 +22,73 @@ import {
   clearEventsLog,
   getAllEvents,
 } from './logger';
+import { debounce } from './debounce';
+
+const LIFECYCLE_DEBOUNCE_MS = 300;
 
 export default function App() {
   const [running, setRunning] = useState(false);
   const [count, setCount] = useState(0);
   const appState = useRef(AppState.currentState);
+  const currentIntervalMs = useRef(LOG_INTERVAL_MS);
+  const currentHighAccuracy = useRef(true);
+  const runningRef = useRef(false);
 
   useEffect(() => {
     checkForMissedShutdown();
     AsyncStorage.setItem(APP_STATE_KEY, 'foreground');
 
-    const sub = AppState.addEventListener('change', (next) => {
+    const applyAppStateChange = debounce((next) => {
       appState.current = next;
       AsyncStorage.setItem(
         APP_STATE_KEY,
         next === 'active' ? 'foreground' : 'background'
       );
       logEvent(next === 'active' ? 'app_foreground' : 'app_background');
+    }, LIFECYCLE_DEBOUNCE_MS);
+
+    const sub = AppState.addEventListener('change', applyAppStateChange);
+
+    Location.hasStartedLocationUpdatesAsync(LOCATION_TASK_NAME).then((started) => {
+      runningRef.current = started;
+      setRunning(started);
     });
 
-    Location.hasStartedLocationUpdatesAsync(LOCATION_TASK_NAME).then(setRunning);
-
+    // Applies polling-interval-tier and accuracy-mode changes computed by the background task.
+    // Expo has no API to retune an active watch's timeInterval/accuracy - restarting it is only
+    // documented-safe from foreground JS (not from inside the task callback itself), so this
+    // foreground poll is where that restart actually happens. See locationWatch.js and the design
+    // doc's "Adaptive polling frequency" section - this means tier/accuracy changes only take
+    // effect while the app is foregrounded.
     const interval = setInterval(async () => {
       setCount(await countLogs());
+
+      if (!runningRef.current) return;
+      const [desiredIntervalRaw, desiredHighAccuracyRaw] = await Promise.all([
+        AsyncStorage.getItem(DESIRED_INTERVAL_KEY),
+        AsyncStorage.getItem(DESIRED_HIGH_ACCURACY_KEY),
+      ]);
+      const desiredInterval = desiredIntervalRaw ? Number(desiredIntervalRaw) : null;
+      const desiredHighAccuracy = desiredHighAccuracyRaw != null ? desiredHighAccuracyRaw === '1' : null;
+      const intervalChanged = desiredInterval && desiredInterval !== currentIntervalMs.current;
+      const accuracyChanged = desiredHighAccuracy != null && desiredHighAccuracy !== currentHighAccuracy.current;
+      if (intervalChanged || accuracyChanged) {
+        const nextInterval = desiredInterval ?? currentIntervalMs.current;
+        const nextHighAccuracy = desiredHighAccuracy ?? currentHighAccuracy.current;
+        try {
+          await restartWatchWithOptions(nextInterval, { highAccuracy: nextHighAccuracy });
+          currentIntervalMs.current = nextInterval;
+          currentHighAccuracy.current = nextHighAccuracy;
+          await logEvent('polling_settings_changed', { interval_ms: nextInterval, high_accuracy: nextHighAccuracy });
+        } catch (err) {
+          console.error('Failed to apply new polling settings', err);
+        }
+      }
     }, 5000);
 
     return () => {
       sub.remove();
+      applyAppStateChange.cancel();
       clearInterval(interval);
     };
   }, []);
@@ -51,6 +98,21 @@ export default function App() {
     if (fg.status !== 'granted') return;
     const bg = await Location.requestBackgroundPermissionsAsync();
     if (bg.status !== 'granted') return;
+
+    // Android refuses to start a location-type foreground service unless the app is currently
+    // foregrounded at that exact call. startWatch() must run before anything below that opens a
+    // separate Activity (the battery-optimization Settings screen) - that navigation backgrounds
+    // this app immediately, and if the FGS start call landed after that we'd hit "Couldn't start
+    // the foreground service: Foreground service cannot be started when the application is in
+    // the background" instead of ever starting tracking.
+    await startWatch(LOG_INTERVAL_MS, { highAccuracy: true });
+    currentIntervalMs.current = LOG_INTERVAL_MS;
+    currentHighAccuracy.current = true;
+    await AsyncStorage.removeItem(DESIRED_INTERVAL_KEY);
+    await AsyncStorage.removeItem(DESIRED_HIGH_ACCURACY_KEY);
+    await recordHeartbeat('start_tracking');
+    runningRef.current = true;
+    setRunning(true);
 
     if (Platform.OS === 'android') {
       try {
@@ -68,24 +130,12 @@ export default function App() {
         console.error('READ_PHONE_STATE request failed', err);
       }
     }
-
-    await Location.startLocationUpdatesAsync(LOCATION_TASK_NAME, {
-      accuracy: Location.Accuracy.High,
-      timeInterval: LOG_INTERVAL_MS,
-      distanceInterval: 0,
-      showsBackgroundLocationIndicator: true,
-      foregroundService: {
-        notificationTitle: 'RaahMitra GPS logger',
-        notificationBody: `Logging every ${LOG_INTERVAL_MS / 1000}s`,
-      },
-    });
-    await recordHeartbeat('start_tracking');
-    setRunning(true);
   }
 
   async function stop() {
-    await Location.stopLocationUpdatesAsync(LOCATION_TASK_NAME);
+    await stopWatch();
     await recordHeartbeat('stop_tracking');
+    runningRef.current = false;
     setRunning(false);
   }
 

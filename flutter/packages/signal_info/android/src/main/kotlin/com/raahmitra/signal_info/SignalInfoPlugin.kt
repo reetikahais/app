@@ -45,7 +45,7 @@ class SignalInfoPlugin : FlutterPlugin, MethodCallHandler {
     val tm = context.getSystemService(Context.TELEPHONY_SERVICE) as? TelephonyManager
       ?: return info
 
-    info["carrier"] = tm.networkOperatorName
+    info["carrier"] = tm.simOperatorName.takeIf { it.isNotEmpty() } ?: tm.networkOperatorName
 
     val hasPhoneState = ContextCompat.checkSelfPermission(
       context,

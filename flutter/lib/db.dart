@@ -11,7 +11,7 @@ Future<Database> openLogDb() async {
   final dbPath = await _dbFilePath();
   return openDatabase(
     dbPath,
-    version: 3,
+    version: 6,
     onCreate: (db, version) => db.execute('''
       CREATE TABLE logs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -26,7 +26,13 @@ Future<Database> openLogDb() async {
         signal_dbm INTEGER,
         signal_level INTEGER,
         carrier TEXT,
-        network_type TEXT
+        network_type TEXT,
+        movement_state TEXT,
+        processed_latitude REAL,
+        processed_longitude REAL,
+        distance_from_anchor_m REAL,
+        location_quality INTEGER,
+        processing_version INTEGER
       )
     '''),
     onUpgrade: (db, oldVersion, newVersion) async {
@@ -38,6 +44,18 @@ Future<Database> openLogDb() async {
         await db.execute('ALTER TABLE logs ADD COLUMN signal_level INTEGER');
         await db.execute('ALTER TABLE logs ADD COLUMN carrier TEXT');
         await db.execute('ALTER TABLE logs ADD COLUMN network_type TEXT');
+      }
+      if (oldVersion < 4) {
+        await db.execute('ALTER TABLE logs ADD COLUMN movement_state TEXT');
+        await db.execute('ALTER TABLE logs ADD COLUMN processed_latitude REAL');
+        await db.execute('ALTER TABLE logs ADD COLUMN processed_longitude REAL');
+        await db.execute('ALTER TABLE logs ADD COLUMN distance_from_anchor_m REAL');
+      }
+      if (oldVersion < 5) {
+        await db.execute('ALTER TABLE logs ADD COLUMN location_quality INTEGER');
+      }
+      if (oldVersion < 6) {
+        await db.execute('ALTER TABLE logs ADD COLUMN processing_version INTEGER');
       }
     },
   );
