@@ -12,6 +12,8 @@ import {
   LOG_INTERVAL_MS,
   DESIRED_INTERVAL_KEY,
   DESIRED_HIGH_ACCURACY_KEY,
+  APPLIED_INTERVAL_KEY,
+  APPLIED_HIGH_ACCURACY_KEY,
 } from './locationTask';
 import { startWatch, stopWatch, restartWatchWithOptions } from './locationWatch';
 import { countLogs, clearLogs, getAllLogs } from './db';
@@ -30,13 +32,50 @@ export default function App() {
   const [running, setRunning] = useState(false);
   const [count, setCount] = useState(0);
   const appState = useRef(AppState.currentState);
-  const currentIntervalMs = useRef(LOG_INTERVAL_MS);
-  const currentHighAccuracy = useRef(true);
   const runningRef = useRef(false);
 
   useEffect(() => {
     checkForMissedShutdown();
     AsyncStorage.setItem(APP_STATE_KEY, 'foreground');
+
+    // Restarting the Expo location watch from inside its own background task callback is
+    // confirmed unsafe (tested on-device: it unregisters the task entirely, breaking tracking
+    // until the app is force-stopped) - so this restart can only ever happen from foreground JS,
+    // reconciling against APPLIED_* (what's actually configured on the watch right now) vs
+    // DESIRED_* (what locationTask.js computed from the latest processed fix, updated even while
+    // the phone is locked - movement detection itself was never gated on this). Two triggers call
+    // this, not one: the 5-second poll below covers the app already being open, and the AppState
+    // listener covers the far more important case for a locked-phone travel app - the moment the
+    // user unlocks/reopens, this fires immediately via the guaranteed OS lifecycle event, rather
+    // than waiting on a passive timer that may or may not still be ticking. Worst case is now
+    // bounded by "how long the phone stays locked before next glanced at", not "until the app is
+    // fully reopened".
+    async function reconcilePollingConfig() {
+      const [desiredIntervalRaw, desiredHighAccuracyRaw, appliedIntervalRaw, appliedHighAccuracyRaw] = await Promise.all([
+        AsyncStorage.getItem(DESIRED_INTERVAL_KEY),
+        AsyncStorage.getItem(DESIRED_HIGH_ACCURACY_KEY),
+        AsyncStorage.getItem(APPLIED_INTERVAL_KEY),
+        AsyncStorage.getItem(APPLIED_HIGH_ACCURACY_KEY),
+      ]);
+      const desiredInterval = desiredIntervalRaw ? Number(desiredIntervalRaw) : null;
+      const desiredHighAccuracy = desiredHighAccuracyRaw != null ? desiredHighAccuracyRaw === '1' : null;
+      const appliedInterval = appliedIntervalRaw ? Number(appliedIntervalRaw) : LOG_INTERVAL_MS;
+      const appliedHighAccuracy = appliedHighAccuracyRaw != null ? appliedHighAccuracyRaw === '1' : true;
+      const intervalChanged = desiredInterval && desiredInterval !== appliedInterval;
+      const accuracyChanged = desiredHighAccuracy != null && desiredHighAccuracy !== appliedHighAccuracy;
+      if (!intervalChanged && !accuracyChanged) return;
+
+      const nextInterval = desiredInterval ?? appliedInterval;
+      const nextHighAccuracy = desiredHighAccuracy ?? appliedHighAccuracy;
+      try {
+        await restartWatchWithOptions(nextInterval, { highAccuracy: nextHighAccuracy });
+        await AsyncStorage.setItem(APPLIED_INTERVAL_KEY, String(nextInterval));
+        await AsyncStorage.setItem(APPLIED_HIGH_ACCURACY_KEY, nextHighAccuracy ? '1' : '0');
+        await logEvent('polling_settings_changed', { interval_ms: nextInterval, high_accuracy: nextHighAccuracy });
+      } catch (err) {
+        console.error('Failed to apply new polling settings', err);
+      }
+    }
 
     const applyAppStateChange = debounce((next) => {
       appState.current = next;
@@ -45,6 +84,9 @@ export default function App() {
         next === 'active' ? 'foreground' : 'background'
       );
       logEvent(next === 'active' ? 'app_foreground' : 'app_background');
+      if (next === 'active' && runningRef.current) {
+        reconcilePollingConfig();
+      }
     }, LIFECYCLE_DEBOUNCE_MS);
 
     const sub = AppState.addEventListener('change', applyAppStateChange);
@@ -54,36 +96,9 @@ export default function App() {
       setRunning(started);
     });
 
-    // Applies polling-interval-tier and accuracy-mode changes computed by the background task.
-    // Expo has no API to retune an active watch's timeInterval/accuracy - restarting it is only
-    // documented-safe from foreground JS (not from inside the task callback itself), so this
-    // foreground poll is where that restart actually happens. See locationWatch.js and the design
-    // doc's "Adaptive polling frequency" section - this means tier/accuracy changes only take
-    // effect while the app is foregrounded.
     const interval = setInterval(async () => {
       setCount(await countLogs());
-
-      if (!runningRef.current) return;
-      const [desiredIntervalRaw, desiredHighAccuracyRaw] = await Promise.all([
-        AsyncStorage.getItem(DESIRED_INTERVAL_KEY),
-        AsyncStorage.getItem(DESIRED_HIGH_ACCURACY_KEY),
-      ]);
-      const desiredInterval = desiredIntervalRaw ? Number(desiredIntervalRaw) : null;
-      const desiredHighAccuracy = desiredHighAccuracyRaw != null ? desiredHighAccuracyRaw === '1' : null;
-      const intervalChanged = desiredInterval && desiredInterval !== currentIntervalMs.current;
-      const accuracyChanged = desiredHighAccuracy != null && desiredHighAccuracy !== currentHighAccuracy.current;
-      if (intervalChanged || accuracyChanged) {
-        const nextInterval = desiredInterval ?? currentIntervalMs.current;
-        const nextHighAccuracy = desiredHighAccuracy ?? currentHighAccuracy.current;
-        try {
-          await restartWatchWithOptions(nextInterval, { highAccuracy: nextHighAccuracy });
-          currentIntervalMs.current = nextInterval;
-          currentHighAccuracy.current = nextHighAccuracy;
-          await logEvent('polling_settings_changed', { interval_ms: nextInterval, high_accuracy: nextHighAccuracy });
-        } catch (err) {
-          console.error('Failed to apply new polling settings', err);
-        }
-      }
+      if (runningRef.current) await reconcilePollingConfig();
     }, 5000);
 
     return () => {
@@ -106,8 +121,8 @@ export default function App() {
     // the foreground service: Foreground service cannot be started when the application is in
     // the background" instead of ever starting tracking.
     await startWatch(LOG_INTERVAL_MS, { highAccuracy: true });
-    currentIntervalMs.current = LOG_INTERVAL_MS;
-    currentHighAccuracy.current = true;
+    await AsyncStorage.setItem(APPLIED_INTERVAL_KEY, String(LOG_INTERVAL_MS));
+    await AsyncStorage.setItem(APPLIED_HIGH_ACCURACY_KEY, '1');
     await AsyncStorage.removeItem(DESIRED_INTERVAL_KEY);
     await AsyncStorage.removeItem(DESIRED_HIGH_ACCURACY_KEY);
     await recordHeartbeat('start_tracking');

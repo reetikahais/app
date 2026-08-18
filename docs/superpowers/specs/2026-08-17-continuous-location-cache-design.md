@@ -376,6 +376,78 @@ MOVING polling interval — all superseded by Round 2's already-shipped, already
 - `flutter/test/movement_state_machine_test.dart`: mirrored `processingVersion`/`computeFixMetrics`
   tests. **Not executed in this environment (no Flutter SDK on PATH)** — run `flutter test` locally.
 
+## Round 4 — background watch retune for locked-phone travel tracking
+
+**Problem:** the only place that ever called `restartWatchWithOptions(...)` was `App.js`'s
+foreground 5-second poll. If the phone locked right after settling into a slow tier (e.g. 90s
+background-stationary) and the user then started moving, that JS timer stops running (foreground
+JS is not guaranteed to keep ticking once backgrounded/locked) — the watch stays at 90s until the
+app is next foregrounded, even though `locationTask.js` was already correctly reclassifying each
+slow-arriving fix as `MOVING` the whole time. Movement *detection* never depended on the foreground
+timer (the background task runs `processLocationFix` on every OS-delivered batch regardless of app
+state) — only *retuning the watch's cadence* did.
+
+**Checked (again) whether restarting the watch from inside its own background task callback is
+documented-safe:** fetched the exact v57 Location docs twice. Confirmed: still genuinely silent,
+not confirmed safe *or* unsafe (unlike `startGeofencingAsync`, which the docs explicitly say can be
+called again to update an active task — no equivalent statement exists for
+`startLocationUpdatesAsync`). `distanceInterval`/`deferredUpdatesDistance` were also checked as a
+possible declarative alternative (configure the watch once with both a time and distance trigger,
+never needing a runtime restart) — ruled out because Android's underlying `smallestDisplacement`
+semantics *suppress* redundant same-spot updates, they don't shorten the interval below what's
+configured; there's no documented way to get "fast when moving, slow when still" without changing
+`timeInterval` at runtime.
+
+**First attempt (reverted — confirmed unsafe on real hardware).** `locationTask.js` briefly
+attempted `restartWatchWithOptions(...)` itself, from inside the background task, wrapped in
+try/catch, on the theory that a failure would just be a rejected promise leaving `DESIRED_*` as a
+foreground fallback. **Tested on a real device (OnePlus 6) and confirmed this does not fail
+cleanly**: calling `stopLocationUpdatesAsync`/`startLocationUpdatesAsync` from inside the task's
+own callback unregisters the task entirely. TaskManager logged `Registered task...` followed
+within the same second by `Unregistering task...`, and every subsequent restart attempt (including
+`App.js`'s unrelated foreground poll) then threw
+`TaskNotFoundException: Task 'raahmitra-background-location-task' not found` in a tight 5-second
+loop — tracking stopped entirely until the app was force-stopped and restarted. This is a real,
+now-confirmed answer to the ambiguity the docs left open: **restarting the watch from inside its
+own background task callback is unsafe**, not just undocumented. Reverted; `locationTask.js` goes
+back to only computing and persisting `DESIRED_*` for `App.js`'s foreground poll to apply, exactly
+as before this attempt. `APPLIED_INTERVAL_KEY`/`APPLIED_HIGH_ACCURACY_KEY` were kept as a small,
+low-risk improvement on their own — `App.js`'s foreground poll now reconciles against these
+AsyncStorage keys instead of local component refs, with no functional change (still the same
+foreground-only restart it always was).
+
+**Flutter needed no change either way.** Its `Timer.periodic` already lives inside the same
+long-lived `flutter_background_service` isolate as the tick logic itself (`onServiceStart`'s
+`scheduleTick`), so it already reschedules itself with the newly-computed interval on every tick,
+regardless of foreground/background/locked state — this was never gated on a foreground-only timer
+the way RN's was, and never carried this risk.
+
+**Actual fix: reconcile on the guaranteed lifecycle event, not just a passive timer.** Restarting
+the watch still only ever happens from foreground JS (confirmed the only safe option above) — but
+`App.js` previously only attempted this from its 5-second `setInterval`, which has no guarantee of
+still being scheduled while the phone is locked. `App.js`'s `AppState` `'change'` listener, however,
+is an OS-delivered lifecycle callback, not a passive timer — it reliably fires the moment the user
+unlocks/reopens the app. The reconciliation logic (`DESIRED_*` vs `APPLIED_*`, restart-if-different)
+was extracted into one `reconcilePollingConfig()` function, now called from *both* triggers: the
+existing 5-second poll (covers the app already being open) and, new, the `AppState` listener's
+`'active'` transition (covers the far more important locked-phone case — reconciliation now fires
+immediately on unlock, not whenever the next poll tick happens to land). This doesn't make the
+watch retune *while still locked* (still confirmed unsafe from background) — it bounds the stale
+window to "how long the phone stays locked before it's next glanced at" instead of "until the app
+is fully reopened," which is the best achievable fix given the confirmed background-restart
+constraint.
+
+**Not yet empirically re-verified on-device** with an actual lock→walk→unlock cycle (that's the
+real test of whether this closes the gap in practice) — logcat/`events.log`'s
+`polling_settings_changed` event will show up immediately on unlock if this works as intended.
+
+### Testing (Round 4 additions)
+
+- Net change after the revert + fix: no new automated tests (App.js has no test harness in this
+  repo, same as its earlier ordering fix — this remains a manually/on-device-verified area).
+  **67 RN tests total, all passing** — unchanged from before this round, since nothing here touched
+  the pure, already-tested `movementStateMachine.js`/`locationTask.js` logic.
+
 ## Out of scope (this doc)
 
 - Any map UI or API/DB pipeline — neither exists in this repo today, and req 11 (pipeline

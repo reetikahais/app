@@ -23,6 +23,12 @@ export const LOG_INTERVAL_MS = 30000;
 export const MOVEMENT_STATE_KEY = 'movement_state_v1';
 export const DESIRED_INTERVAL_KEY = 'desired_polling_interval_ms';
 export const DESIRED_HIGH_ACCURACY_KEY = 'desired_high_accuracy';
+// Tracks what's actually configured on the native watch right now - written by whichever side
+// (this background task, or App.js's foreground poll) last succeeded in applying a config, and
+// read by both, so neither one repeats a restart the other already made. Defaults (when unset)
+// match start()'s initial startWatch() call in App.js.
+export const APPLIED_INTERVAL_KEY = 'applied_polling_interval_ms';
+export const APPLIED_HIGH_ACCURACY_KEY = 'applied_high_accuracy';
 
 async function loadMovementState() {
   try {
@@ -115,9 +121,16 @@ async function runLocationTask({ data, error }) {
 
     await saveMovementState(movementState);
 
+    // Confirmed empirically on-device (OnePlus 6): calling stopLocationUpdatesAsync/
+    // startLocationUpdatesAsync from inside this task's own callback does not fail cleanly - it
+    // unregisters the task entirely (TaskManager then reports TaskNotFoundException on every
+    // subsequent stop/start attempt, including from the foreground poll, until the app is
+    // force-stopped and restarted). Restarting the watch must only ever happen from foreground JS
+    // (App.js) - this only computes and persists the desired config for that poll to pick up.
     const desiredIntervalMs = computePollingIntervalMs(movementState, Date.now(), appState);
+    const desiredHighAccuracy = wantsHighAccuracy(movementState);
     await AsyncStorage.setItem(DESIRED_INTERVAL_KEY, String(desiredIntervalMs));
-    await AsyncStorage.setItem(DESIRED_HIGH_ACCURACY_KEY, wantsHighAccuracy(movementState) ? '1' : '0');
+    await AsyncStorage.setItem(DESIRED_HIGH_ACCURACY_KEY, desiredHighAccuracy ? '1' : '0');
 
     const last = locations[locations.length - 1];
     await logEvent('location_task_fired', {
