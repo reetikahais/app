@@ -241,6 +241,27 @@ void main() {
       expect(lonOffsetFromLineProcessed, greaterThan(0));
     });
 
+    test('a low-accuracy sideways jump while MOVING is damped harder than the same jump at good accuracy', () {
+      // Same road, same forward+sideways jump at C (large enough that both accuracy values still
+      // route through the same "still moving" branch, not CONFIRMING_STOP - isolates the blend
+      // weighting itself). A degraded fix (field-observed: an 85m-accuracy reading during a real
+      // walk pulled the processed trail 251m off anchor) must be trusted less than a normal one,
+      // not blended in at the same fixed rate regardless of how uncertain the raw measurement was.
+      double sidewaysJumpOffset(double cAccuracy) {
+        var state = createInitialMovementState();
+        state = processLocationFix(state, _fix(0, 0, 10)); // anchor
+        state = processLocationFix(state, _fix(50, 0, 10, speed: 2)); // confirms MOVING
+        state = processLocationFix(state, _fix(100, 0, 10, speed: 2)); // lastMovingFix
+        state = processLocationFix(state, _fix(250, 30, cAccuracy, speed: 2)); // forward+sideways jump
+        expect(state.state, 'MOVING'); // same branch for every accuracy tested below
+        return (getProcessedLocation(state).lon! - _baseLon).abs();
+      }
+
+      final goodAccuracyOffset = sidewaysJumpOffset(10);
+      final badAccuracyOffset = sidewaysJumpOffset(85);
+      expect(badAccuracyOffset, lessThan(goodAccuracyOffset));
+    });
+
     test('getDistanceFromAnchorM is 0 when there is no anchor (MOVING)', () {
       var state = createInitialMovementState();
       state = processLocationFix(state, _fix(0, 0, 10));

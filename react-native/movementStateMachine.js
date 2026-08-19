@@ -106,6 +106,19 @@ export const CONFIRMING_MOVEMENT_SMOOTHING_ALPHA = 0.5;
 export const MOVING_SMOOTHING_ALPHA = 0.8;
 export const CONFIRMING_STOP_SMOOTHING_ALPHA = 0.5;
 
+// blendPoint's alpha above was a flat rate regardless of how uncertain the incoming fix was -
+// field data showed a single 85m-accuracy fix (above this reference) yank the displayed trail
+// 251m off anchor, the same as a good 10m fix would. Unlike the STATIONARY anchor (already
+// accuracy-weighted via foldFixIntoAnchor), reuse MIN_NOISE_FLOOR_M as the "trustworthy" accuracy
+// reference: at or below it, alpha is unchanged (every existing fixture uses <=15m fixes here,
+// so this is additive, not a behavior change for normal fixes); above it, alpha shrinks in
+// proportion to how much worse the fix is, so a degraded reading pulls the trail less.
+export const BLEND_ACCURACY_REFERENCE_M = MIN_NOISE_FLOOR_M;
+
+function accuracyWeightedAlpha(baseAlpha, accuracy) {
+  return baseAlpha * Math.min(1, BLEND_ACCURACY_REFERENCE_M / accuracy);
+}
+
 export function blendPoint(prev, next, alpha) {
   return {
     lat: prev.lat + (next.lat - prev.lat) * alpha,
@@ -127,7 +140,9 @@ export function createInitialMovementState() {
 }
 
 function toMoving(fix, prevProcessed) {
-  const processed = prevProcessed ? blendPoint(prevProcessed, fix, MOVING_SMOOTHING_ALPHA) : { lat: fix.lat, lon: fix.lon };
+  const processed = prevProcessed
+    ? blendPoint(prevProcessed, fix, accuracyWeightedAlpha(MOVING_SMOOTHING_ALPHA, fix.accuracy))
+    : { lat: fix.lat, lon: fix.lon };
   return {
     state: 'MOVING',
     anchor: null,
@@ -171,7 +186,11 @@ function processStationary(prev, fix) {
   if (isSpeedConfirmed(fix)) {
     return toMoving(fix, { lat: prev.processedLat, lon: prev.processedLon });
   }
-  const processed = blendPoint({ lat: prev.processedLat, lon: prev.processedLon }, fix, CONFIRMING_MOVEMENT_SMOOTHING_ALPHA);
+  const processed = blendPoint(
+    { lat: prev.processedLat, lon: prev.processedLon },
+    fix,
+    accuracyWeightedAlpha(CONFIRMING_MOVEMENT_SMOOTHING_ALPHA, fix.accuracy)
+  );
   return {
     state: 'CONFIRMING_MOVEMENT',
     anchor: prev.anchor,
@@ -216,7 +235,11 @@ function processConfirmingMovement(prev, fix) {
     }
     // Inconsistent direction: not a confirmed move yet. Restart the confirmation window from
     // this fix rather than growing it unboundedly - an erratic streak never converges.
-    const processed = blendPoint({ lat: prev.processedLat, lon: prev.processedLon }, fix, CONFIRMING_MOVEMENT_SMOOTHING_ALPHA);
+    const processed = blendPoint(
+      { lat: prev.processedLat, lon: prev.processedLon },
+      fix,
+      accuracyWeightedAlpha(CONFIRMING_MOVEMENT_SMOOTHING_ALPHA, fix.accuracy)
+    );
     return {
       state: 'CONFIRMING_MOVEMENT',
       anchor: prev.anchor,
@@ -228,7 +251,11 @@ function processConfirmingMovement(prev, fix) {
       processedLon: processed.lon,
     };
   }
-  const processed = blendPoint({ lat: prev.processedLat, lon: prev.processedLon }, fix, CONFIRMING_MOVEMENT_SMOOTHING_ALPHA);
+  const processed = blendPoint(
+    { lat: prev.processedLat, lon: prev.processedLon },
+    fix,
+    accuracyWeightedAlpha(CONFIRMING_MOVEMENT_SMOOTHING_ALPHA, fix.accuracy)
+  );
   return {
     state: 'CONFIRMING_MOVEMENT',
     anchor: prev.anchor,
@@ -244,7 +271,11 @@ function processConfirmingMovement(prev, fix) {
 function processMoving(prev, fix) {
   const { distanceM: dist, thresholdM: threshold } = computeFixMetrics(prev.lastMovingFix, fix);
   if (dist <= threshold) {
-    const processed = blendPoint({ lat: prev.processedLat, lon: prev.processedLon }, fix, CONFIRMING_STOP_SMOOTHING_ALPHA);
+    const processed = blendPoint(
+      { lat: prev.processedLat, lon: prev.processedLon },
+      fix,
+      accuracyWeightedAlpha(CONFIRMING_STOP_SMOOTHING_ALPHA, fix.accuracy)
+    );
     return {
       state: 'CONFIRMING_STOP',
       anchor: null,
@@ -281,7 +312,11 @@ function processConfirmingStop(prev, fix) {
       processedLon: anchor.lon,
     };
   }
-  const processed = blendPoint({ lat: prev.processedLat, lon: prev.processedLon }, fix, CONFIRMING_STOP_SMOOTHING_ALPHA);
+  const processed = blendPoint(
+    { lat: prev.processedLat, lon: prev.processedLon },
+    fix,
+    accuracyWeightedAlpha(CONFIRMING_STOP_SMOOTHING_ALPHA, fix.accuracy)
+  );
   return {
     state: 'CONFIRMING_STOP',
     anchor: null,

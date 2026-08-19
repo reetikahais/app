@@ -181,6 +181,19 @@ const double confirmingMovementSmoothingAlpha = 0.5;
 const double movingSmoothingAlpha = 0.8;
 const double confirmingStopSmoothingAlpha = 0.5;
 
+// blendPoint's alpha above was a flat rate regardless of how uncertain the incoming fix was -
+// field data showed a single 85m-accuracy fix (above this reference) yank the displayed trail
+// 251m off anchor, the same as a good 10m fix would. Unlike the STATIONARY anchor (already
+// accuracy-weighted via foldFixIntoAnchor), reuse minNoiseFloorM as the "trustworthy" accuracy
+// reference: at or below it, alpha is unchanged (every existing fixture uses <=15m fixes here,
+// so this is additive, not a behavior change for normal fixes); above it, alpha shrinks in
+// proportion to how much worse the fix is, so a degraded reading pulls the trail less.
+const double blendAccuracyReferenceM = minNoiseFloorM;
+
+double _accuracyWeightedAlpha(double baseAlpha, double accuracy) {
+  return baseAlpha * math.min(1.0, blendAccuracyReferenceM / accuracy);
+}
+
 ({double lat, double lon}) blendPoint(({double lat, double lon}) prev, GeoPoint next, double alpha) {
   return (
     lat: prev.lat + (next.lat - prev.lat) * alpha,
@@ -193,7 +206,9 @@ MovementState createInitialMovementState() {
 }
 
 MovementState _toMoving(LocationFix fix, ({double lat, double lon})? prevProcessed) {
-  final processed = prevProcessed != null ? blendPoint(prevProcessed, fix, movingSmoothingAlpha) : (lat: fix.lat, lon: fix.lon);
+  final processed = prevProcessed != null
+      ? blendPoint(prevProcessed, fix, _accuracyWeightedAlpha(movingSmoothingAlpha, fix.accuracy))
+      : (lat: fix.lat, lon: fix.lon);
   return MovementState(
     state: 'MOVING',
     lastMovingFix: fix,
@@ -232,7 +247,11 @@ MovementState _processStationary(MovementState prev, LocationFix fix) {
   if (_isSpeedConfirmed(fix)) {
     return _toMoving(fix, _prevProcessed(prev));
   }
-  final processed = blendPoint(_prevProcessed(prev)!, fix, confirmingMovementSmoothingAlpha);
+  final processed = blendPoint(
+      _prevProcessed(prev)!,
+      fix,
+      _accuracyWeightedAlpha(confirmingMovementSmoothingAlpha, fix.accuracy),
+    );
   return MovementState(
     state: 'CONFIRMING_MOVEMENT',
     anchor: prev.anchor,
@@ -272,7 +291,11 @@ MovementState _processConfirmingMovement(MovementState prev, LocationFix fix) {
     }
     // Inconsistent direction: not a confirmed move yet. Restart the confirmation window from
     // this fix rather than growing it unboundedly - an erratic streak never converges.
-    final processed = blendPoint(_prevProcessed(prev)!, fix, confirmingMovementSmoothingAlpha);
+    final processed = blendPoint(
+      _prevProcessed(prev)!,
+      fix,
+      _accuracyWeightedAlpha(confirmingMovementSmoothingAlpha, fix.accuracy),
+    );
     return MovementState(
       state: 'CONFIRMING_MOVEMENT',
       anchor: prev.anchor,
@@ -282,7 +305,11 @@ MovementState _processConfirmingMovement(MovementState prev, LocationFix fix) {
       processedLon: processed.lon,
     );
   }
-  final processed = blendPoint(_prevProcessed(prev)!, fix, confirmingMovementSmoothingAlpha);
+  final processed = blendPoint(
+      _prevProcessed(prev)!,
+      fix,
+      _accuracyWeightedAlpha(confirmingMovementSmoothingAlpha, fix.accuracy),
+    );
   return MovementState(
     state: 'CONFIRMING_MOVEMENT',
     anchor: prev.anchor,
@@ -296,7 +323,11 @@ MovementState _processConfirmingMovement(MovementState prev, LocationFix fix) {
 MovementState _processMoving(MovementState prev, LocationFix fix) {
   final metrics = computeFixMetrics(prev.lastMovingFix!, fix);
   if (metrics.distanceM <= metrics.thresholdM) {
-    final processed = blendPoint(_prevProcessed(prev)!, fix, confirmingStopSmoothingAlpha);
+    final processed = blendPoint(
+      _prevProcessed(prev)!,
+      fix,
+      _accuracyWeightedAlpha(confirmingStopSmoothingAlpha, fix.accuracy),
+    );
     return MovementState(
       state: 'CONFIRMING_STOP',
       lastMovingFix: prev.lastMovingFix,
@@ -329,7 +360,11 @@ MovementState _processConfirmingStop(MovementState prev, LocationFix fix) {
       processedLon: anchor.lon,
     );
   }
-  final processed = blendPoint(_prevProcessed(prev)!, fix, confirmingStopSmoothingAlpha);
+  final processed = blendPoint(
+      _prevProcessed(prev)!,
+      fix,
+      _accuracyWeightedAlpha(confirmingStopSmoothingAlpha, fix.accuracy),
+    );
   return MovementState(
     state: 'CONFIRMING_STOP',
     lastMovingFix: prev.lastMovingFix,
