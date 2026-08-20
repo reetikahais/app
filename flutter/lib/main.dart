@@ -80,6 +80,7 @@ class _LoggerHomeState extends State<LoggerHome> with WidgetsBindingObserver {
   bool _running = false;
   bool _showMap = false;
   WebViewController? _mapController;
+  bool _mapRefreshing = false;
   final _lifecycleDebouncer = Debouncer(lifecycleDebounceDelay);
 
   @override
@@ -181,14 +182,25 @@ class _LoggerHomeState extends State<LoggerHome> with WidgetsBindingObserver {
   }
 
   Future<void> _refreshMap() async {
-    final db = await openLogDb();
-    final rows = await getAllLogs(db);
-    final points = buildMapPoints(rows);
-    final controller = WebViewController()
-      ..setJavaScriptMode(JavaScriptMode.unrestricted)
-      ..addJavaScriptChannel('FlutterExport', onMessageReceived: _handleMapExport)
-      ..loadHtmlString(animatorHtml(points));
-    setState(() => _mapController = controller);
+    if (_mapRefreshing) return;
+    _mapRefreshing = true;
+    try {
+      final db = await openLogDb();
+      final rows = await getAllLogs(db);
+      final points = buildMapPoints(rows);
+      final html = animatorHtml(points);
+      if (_mapController == null) {
+        final controller = WebViewController()
+          ..setJavaScriptMode(JavaScriptMode.unrestricted)
+          ..addJavaScriptChannel('FlutterExport', onMessageReceived: _handleMapExport)
+          ..loadHtmlString(html);
+        setState(() => _mapController = controller);
+      } else {
+        await _mapController!.loadHtmlString(html);
+      }
+    } finally {
+      _mapRefreshing = false;
+    }
   }
 
   Future<void> _openMap() async {
