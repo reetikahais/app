@@ -1,13 +1,14 @@
 // Templates buildMapPoints() output straight into a self-contained HTML page for a WebView.
-// Adapted from tools/gps-path-animator.html: same map/animation/legend/telemetry UI, minus the
-// paste-JSON/file-picker load panel (points arrive already computed, no client-side detection
-// logic needed here - buildMapPoints already flagged isSpike/isSpeedOutlier/isLowAcc/gapBefore).
-// Export buttons postMessage to native instead of Blob+<a download>, which is unreliable in a
-// mobile WebView (RN and Flutter each supply a different message bridge - see the sendExport()
-// shim at the bottom of the generated script).
+// Adapted from tools/gps-path-animator.html: same map/animation/legend UI and red/green movement
+// coloring. Deliberately dropped for this compact embedded view: the paste-JSON/file-picker load
+// panel (points arrive already computed), the right-hand Live Telemetry readout panel, and the
+// Fix Log list with click-to-seek - none of those fit a small WebView pane. Export buttons
+// postMessage to native instead of Blob+<a download>, which is unreliable in a mobile WebView (RN
+// and Flutter each supply a different message bridge - see the sendExport() shim at the bottom of
+// the generated script).
 
 export function animatorHtml(points) {
-  const pointsJson = JSON.stringify(points);
+  const pointsJson = JSON.stringify(points).replace(/</g, '\\u003c');
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -101,7 +102,9 @@ function sendExport(format, filename, content){
   }
 }
 
-if(points.length < 2){
+const plottable = points.filter(p => !p.excluded);
+
+if(points.length < 2 || plottable.length === 0){
   document.getElementById('emptyState').style.display = 'flex';
 } else {
   const t0 = points[0].t, tN = points[points.length-1].t, totalSpanMs = Math.max(tN - t0, 1);
@@ -111,7 +114,6 @@ if(points.length < 2){
   }).addTo(map);
   L.control.scale({metric:true, imperial:false, position:'bottomright'}).addTo(map);
 
-  const plottable = points.filter(p => !p.excluded);
   plottable.forEach((p, i) => { p.plottableIdx = i; });
   const runs = [];
   plottable.forEach(p => { (runs[p.runIndex] ??= []).push(p); });
