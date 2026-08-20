@@ -6,7 +6,16 @@ import * as IntentLauncher from 'expo-intent-launcher';
 import * as Sharing from 'expo-sharing';
 import { File, Paths } from 'expo-file-system';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { LOCATION_TASK_NAME, APP_STATE_KEY, LOG_INTERVAL_MS } from './locationTask';
+import {
+  LOCATION_TASK_NAME,
+  APP_STATE_KEY,
+  LOG_INTERVAL_MS,
+  DESIRED_INTERVAL_KEY,
+  DESIRED_HIGH_ACCURACY_KEY,
+  APPLIED_INTERVAL_KEY,
+  APPLIED_HIGH_ACCURACY_KEY,
+} from './locationTask';
+import { startWatch, stopWatch, restartWatchWithOptions } from './locationWatch';
 import { countLogs, clearLogs, getAllLogs } from './db';
 import {
   logEvent,
@@ -15,33 +24,91 @@ import {
   clearEventsLog,
   getAllEvents,
 } from './logger';
+import { debounce } from './debounce';
+import { WebView } from 'react-native-webview';
+import { buildMapPoints } from './mapPoints';
+import { animatorHtml } from './mapAnimatorHtml';
+
+const LIFECYCLE_DEBOUNCE_MS = 300;
 
 export default function App() {
   const [running, setRunning] = useState(false);
   const [count, setCount] = useState(0);
+  const [showMap, setShowMap] = useState(false);
+  const [mapHtml, setMapHtml] = useState(null);
   const appState = useRef(AppState.currentState);
+  const runningRef = useRef(false);
 
   useEffect(() => {
     checkForMissedShutdown();
     AsyncStorage.setItem(APP_STATE_KEY, 'foreground');
 
-    const sub = AppState.addEventListener('change', (next) => {
+    // Restarting the Expo location watch from inside its own background task callback is
+    // confirmed unsafe (tested on-device: it unregisters the task entirely, breaking tracking
+    // until the app is force-stopped) - so this restart can only ever happen from foreground JS,
+    // reconciling against APPLIED_* (what's actually configured on the watch right now) vs
+    // DESIRED_* (what locationTask.js computed from the latest processed fix, updated even while
+    // the phone is locked - movement detection itself was never gated on this). Two triggers call
+    // this, not one: the 5-second poll below covers the app already being open, and the AppState
+    // listener covers the far more important case for a locked-phone travel app - the moment the
+    // user unlocks/reopens, this fires immediately via the guaranteed OS lifecycle event, rather
+    // than waiting on a passive timer that may or may not still be ticking. Worst case is now
+    // bounded by "how long the phone stays locked before next glanced at", not "until the app is
+    // fully reopened".
+    async function reconcilePollingConfig() {
+      const [desiredIntervalRaw, desiredHighAccuracyRaw, appliedIntervalRaw, appliedHighAccuracyRaw] = await Promise.all([
+        AsyncStorage.getItem(DESIRED_INTERVAL_KEY),
+        AsyncStorage.getItem(DESIRED_HIGH_ACCURACY_KEY),
+        AsyncStorage.getItem(APPLIED_INTERVAL_KEY),
+        AsyncStorage.getItem(APPLIED_HIGH_ACCURACY_KEY),
+      ]);
+      const desiredInterval = desiredIntervalRaw ? Number(desiredIntervalRaw) : null;
+      const desiredHighAccuracy = desiredHighAccuracyRaw != null ? desiredHighAccuracyRaw === '1' : null;
+      const appliedInterval = appliedIntervalRaw ? Number(appliedIntervalRaw) : LOG_INTERVAL_MS;
+      const appliedHighAccuracy = appliedHighAccuracyRaw != null ? appliedHighAccuracyRaw === '1' : true;
+      const intervalChanged = desiredInterval && desiredInterval !== appliedInterval;
+      const accuracyChanged = desiredHighAccuracy != null && desiredHighAccuracy !== appliedHighAccuracy;
+      if (!intervalChanged && !accuracyChanged) return;
+
+      const nextInterval = desiredInterval ?? appliedInterval;
+      const nextHighAccuracy = desiredHighAccuracy ?? appliedHighAccuracy;
+      try {
+        await restartWatchWithOptions(nextInterval, { highAccuracy: nextHighAccuracy });
+        await AsyncStorage.setItem(APPLIED_INTERVAL_KEY, String(nextInterval));
+        await AsyncStorage.setItem(APPLIED_HIGH_ACCURACY_KEY, nextHighAccuracy ? '1' : '0');
+        await logEvent('polling_settings_changed', { interval_ms: nextInterval, high_accuracy: nextHighAccuracy });
+      } catch (err) {
+        console.error('Failed to apply new polling settings', err);
+      }
+    }
+
+    const applyAppStateChange = debounce((next) => {
       appState.current = next;
       AsyncStorage.setItem(
         APP_STATE_KEY,
         next === 'active' ? 'foreground' : 'background'
       );
       logEvent(next === 'active' ? 'app_foreground' : 'app_background');
-    });
+      if (next === 'active' && runningRef.current) {
+        reconcilePollingConfig();
+      }
+    }, LIFECYCLE_DEBOUNCE_MS);
 
-    Location.hasStartedLocationUpdatesAsync(LOCATION_TASK_NAME).then(setRunning);
+    const sub = AppState.addEventListener('change', applyAppStateChange);
+
+    Location.hasStartedLocationUpdatesAsync(LOCATION_TASK_NAME).then((started) => {
+      runningRef.current = started;
+      setRunning(started);
+    });
 
     const interval = setInterval(async () => {
       setCount(await countLogs());
+      if (runningRef.current) await reconcilePollingConfig();
     }, 5000);
 
     return () => {
       sub.remove();
+      applyAppStateChange.cancel();
       clearInterval(interval);
     };
   }, []);
@@ -51,6 +118,21 @@ export default function App() {
     if (fg.status !== 'granted') return;
     const bg = await Location.requestBackgroundPermissionsAsync();
     if (bg.status !== 'granted') return;
+
+    // Android refuses to start a location-type foreground service unless the app is currently
+    // foregrounded at that exact call. startWatch() must run before anything below that opens a
+    // separate Activity (the battery-optimization Settings screen) - that navigation backgrounds
+    // this app immediately, and if the FGS start call landed after that we'd hit "Couldn't start
+    // the foreground service: Foreground service cannot be started when the application is in
+    // the background" instead of ever starting tracking.
+    await startWatch(LOG_INTERVAL_MS, { highAccuracy: true });
+    await AsyncStorage.setItem(APPLIED_INTERVAL_KEY, String(LOG_INTERVAL_MS));
+    await AsyncStorage.setItem(APPLIED_HIGH_ACCURACY_KEY, '1');
+    await AsyncStorage.removeItem(DESIRED_INTERVAL_KEY);
+    await AsyncStorage.removeItem(DESIRED_HIGH_ACCURACY_KEY);
+    await recordHeartbeat('start_tracking');
+    runningRef.current = true;
+    setRunning(true);
 
     if (Platform.OS === 'android') {
       try {
@@ -68,24 +150,20 @@ export default function App() {
         console.error('READ_PHONE_STATE request failed', err);
       }
     }
-
-    await Location.startLocationUpdatesAsync(LOCATION_TASK_NAME, {
-      accuracy: Location.Accuracy.High,
-      timeInterval: LOG_INTERVAL_MS,
-      distanceInterval: 0,
-      showsBackgroundLocationIndicator: true,
-      foregroundService: {
-        notificationTitle: 'RaahMitra GPS logger',
-        notificationBody: `Logging every ${LOG_INTERVAL_MS / 1000}s`,
-      },
-    });
-    await recordHeartbeat('start_tracking');
-    setRunning(true);
   }
 
   async function stop() {
-    await Location.stopLocationUpdatesAsync(LOCATION_TASK_NAME);
+    try {
+      await stopWatch();
+    } catch (err) {
+      // Ensure the user's Stop tap always lands, even if the underlying OS task is in a state
+      // stopWatch() couldn't reconcile (its own known TaskNotFoundException case is already
+      // handled inside stopWatch() itself) - getting stuck here left the UI showing RUNNING
+      // forever with no way to retry, worse than logging an error and finishing the stop.
+      console.error('stopWatch failed during stop()', err);
+    }
     await recordHeartbeat('stop_tracking');
+    runningRef.current = false;
     setRunning(false);
   }
 
@@ -116,6 +194,35 @@ export default function App() {
     }
   }
 
+  async function refreshMap() {
+    const logs = await getAllLogs();
+    setMapHtml(animatorHtml(buildMapPoints(logs)));
+  }
+
+  async function openMap() {
+    await refreshMap();
+    setShowMap(true);
+  }
+
+  async function handleMapExport(event) {
+    try {
+      const { format, filename, content } = JSON.parse(event.nativeEvent.data);
+      const canShare = await Sharing.isAvailableAsync();
+      if (!canShare) {
+        Alert.alert('Export failed', 'Sharing is not available on this device.');
+        return;
+      }
+      const file = new File(Paths.document, filename);
+      if (file.exists) file.delete();
+      file.create();
+      file.write(content);
+      await Sharing.shareAsync(file.uri);
+    } catch (err) {
+      console.error('Map export failed', err);
+      Alert.alert('Export failed', String(err?.message ?? err));
+    }
+  }
+
   function confirmClearLogs() {
     Alert.alert(
       'Clear logs?',
@@ -139,12 +246,33 @@ export default function App() {
     );
   }
 
+  if (showMap) {
+    return (
+      <View style={styles.mapContainer}>
+        <View style={styles.mapToolbar}>
+          <Button title="< Back" onPress={() => setShowMap(false)} />
+          <Button title="Refresh" onPress={refreshMap} />
+        </View>
+        {mapHtml && (
+          <WebView
+            originWhitelist={['*']}
+            source={{ html: mapHtml }}
+            onMessage={handleMapExport}
+            style={styles.webview}
+          />
+        )}
+        <StatusBar style="auto" />
+      </View>
+    );
+  }
+
   return (
     <View style={styles.container}>
       <Text style={styles.title}>RaahMitra GPS Logger (React Native)</Text>
       <Text style={styles.status}>{running ? 'RUNNING' : 'STOPPED'}</Text>
       <Text style={styles.count}>Logs written: {count}</Text>
       <Button title={running ? 'Stop logging' : 'Start logging'} onPress={running ? stop : start} />
+      <Button title="View Map" onPress={openMap} />
       <Button title="Export Logs" onPress={exportLogs} />
       <Button title="Clear Logs" color="#c0392b" onPress={confirmClearLogs} />
       <StatusBar style="auto" />
@@ -163,4 +291,21 @@ const styles = StyleSheet.create({
   title: { fontSize: 18, fontWeight: '600', marginBottom: 12, textAlign: 'center' },
   status: { fontSize: 22, fontWeight: 'bold' },
   count: { fontSize: 18 },
+  mapContainer: {
+    flex: 1,
+    width: '100%',
+    backgroundColor: '#fff',
+  },
+  mapToolbar: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    width: '100%',
+    paddingHorizontal: 12,
+    paddingTop: 40,
+    paddingBottom: 8,
+  },
+  webview: {
+    flex: 1,
+    width: '100%',
+  },
 });

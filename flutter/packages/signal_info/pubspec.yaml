@@ -1,0 +1,19 @@
+name: signal_info
+description: Cellular signal strength/carrier/network-type reader (Android only).
+version: 0.0.1
+publish_to: 'none'
+
+environment:
+  sdk: '>=3.3.0 <4.0.0'
+  flutter: '>=3.3.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+flutter:
+  plugin:
+    platforms:
+      android:
+        package: com.raahmitra.signal_info
+        pluginClass: SignalInfoPlugin

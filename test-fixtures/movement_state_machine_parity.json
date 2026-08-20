@@ -1,0 +1,83 @@
+{
+  "description": "Shared end-to-end sequences the RN (movementStateMachine.js) and Flutter (movement_state_machine.dart) movement state machines must classify identically. Offsets are meters north/east of an arbitrary base point.",
+  "cases": [
+    {
+      "name": "stationary_cluster",
+      "fixes": [
+        { "dNorthM": 0, "dEastM": 0, "accuracy": 19 },
+        { "dNorthM": -9, "dEastM": -3, "accuracy": 35 },
+        { "dNorthM": -10, "dEastM": -5, "accuracy": 36 },
+        { "dNorthM": -13, "dEastM": 3, "accuracy": 41 }
+      ],
+      "expectedFinalState": "STATIONARY",
+      "expectedQuality": 59
+    },
+    {
+      "name": "jump_and_return",
+      "fixes": [
+        { "dNorthM": 0, "dEastM": 0, "accuracy": 10 },
+        { "dNorthM": 200, "dEastM": 0, "accuracy": 15 },
+        { "dNorthM": 2, "dEastM": 0, "accuracy": 10 }
+      ],
+      "expectedFinalState": "STATIONARY"
+    },
+    {
+      "name": "confirmed_by_distance_and_bearing",
+      "fixes": [
+        { "dNorthM": 0, "dEastM": 0, "accuracy": 10 },
+        { "dNorthM": 50, "dEastM": 0, "accuracy": 10 },
+        { "dNorthM": 100, "dEastM": 0, "accuracy": 10 }
+      ],
+      "expectedFinalState": "MOVING"
+    },
+    {
+      "name": "confirmed_by_speed",
+      "fixes": [
+        { "dNorthM": 0, "dEastM": 0, "accuracy": 10 },
+        { "dNorthM": 50, "dEastM": 0, "accuracy": 10, "speed": 1.5 }
+      ],
+      "expectedFinalState": "MOVING",
+      "expectedQuality": 90
+    },
+    {
+      "name": "moving_then_confirmed_stop",
+      "fixes": [
+        { "dNorthM": 0, "dEastM": 0, "accuracy": 10 },
+        { "dNorthM": 50, "dEastM": 0, "accuracy": 10, "speed": 2 },
+        { "dNorthM": 51, "dEastM": 1, "accuracy": 10 },
+        { "dNorthM": 50, "dEastM": 0, "accuracy": 10 }
+      ],
+      "expectedFinalState": "STATIONARY"
+    },
+    {
+      "name": "background_low_accuracy_stays_stationary",
+      "fixes": [
+        { "dNorthM": 0, "dEastM": 0, "accuracy": 30 },
+        { "dNorthM": 15, "dEastM": -10, "accuracy": 45 },
+        { "dNorthM": -10, "dEastM": 20, "accuracy": 50 }
+      ],
+      "expectedFinalState": "STATIONARY"
+    },
+    {
+      "name": "moving_smoothing_stays_close_to_raw_trail",
+      "description": "Light smoothing while MOVING must remain responsive - processed point stays within a few meters of the raw fix even with a sideways jump on one fix.",
+      "fixes": [
+        { "dNorthM": 0, "dEastM": 0, "accuracy": 10 },
+        { "dNorthM": 50, "dEastM": 0, "accuracy": 10, "speed": 2 },
+        { "dNorthM": 100, "dEastM": 0, "accuracy": 10, "speed": 2 },
+        { "dNorthM": 150, "dEastM": 30, "accuracy": 10, "speed": 2 }
+      ],
+      "expectedFinalState": "MOVING",
+      "expectedProcessedWithinMOfLastFix": 25
+    },
+    {
+      "name": "invalid_accuracy_fix_treated_as_uncertain_noise",
+      "description": "A fix with invalid/unknown accuracy (JSON null -> language-specific 'invalid' sentinel: JS null, Dart NaN) right next to the anchor must fold as noise, not crash and not be misclassified as movement.",
+      "fixes": [
+        { "dNorthM": 0, "dEastM": 0, "accuracy": 19 },
+        { "dNorthM": 1, "dEastM": 1, "accuracy": null }
+      ],
+      "expectedFinalState": "STATIONARY"
+    }
+  ]
+}
