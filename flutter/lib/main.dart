@@ -10,11 +10,14 @@ import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:webview_flutter/webview_flutter.dart';
 
 import 'db.dart';
 import 'debouncer.dart';
 import 'location_task.dart';
 import 'logger.dart';
+import 'map_animator_html.dart';
+import 'map_points.dart';
 
 const Duration lifecycleDebounceDelay = Duration(milliseconds: 300);
 
@@ -75,6 +78,8 @@ class LoggerHome extends StatefulWidget {
 class _LoggerHomeState extends State<LoggerHome> with WidgetsBindingObserver {
   int _count = 0;
   bool _running = false;
+  bool _showMap = false;
+  WebViewController? _mapController;
   final _lifecycleDebouncer = Debouncer(lifecycleDebounceDelay);
 
   @override
@@ -175,6 +180,39 @@ class _LoggerHomeState extends State<LoggerHome> with WidgetsBindingObserver {
     }
   }
 
+  Future<void> _refreshMap() async {
+    final db = await openLogDb();
+    final rows = await getAllLogs(db);
+    final points = buildMapPoints(rows);
+    final controller = WebViewController()
+      ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      ..addJavaScriptChannel('FlutterExport', onMessageReceived: _handleMapExport)
+      ..loadHtmlString(animatorHtml(points));
+    setState(() => _mapController = controller);
+  }
+
+  Future<void> _openMap() async {
+    await _refreshMap();
+    setState(() => _showMap = true);
+  }
+
+  Future<void> _handleMapExport(JavaScriptMessage message) async {
+    try {
+      final data = jsonDecode(message.message) as Map<String, dynamic>;
+      final filename = data['filename'] as String;
+      final content = data['content'] as String;
+      final dir = await getApplicationDocumentsDirectory();
+      final exportFile = File(p.join(dir.path, filename));
+      await exportFile.writeAsString(content);
+      await SharePlus.instance.share(ShareParams(files: [XFile(exportFile.path)]));
+    } catch (err) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Map export failed: $err')),
+      );
+    }
+  }
+
   Future<void> _confirmClearLogs() async {
     final confirmed = await showDialog<bool>(
       context: context,
@@ -212,6 +250,27 @@ class _LoggerHomeState extends State<LoggerHome> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) {
+    if (_showMap) {
+      return Scaffold(
+        appBar: AppBar(
+          title: const Text('RaahMitra Map'),
+          leading: IconButton(
+            icon: const Icon(Icons.arrow_back),
+            onPressed: () => setState(() => _showMap = false),
+          ),
+          actions: [
+            IconButton(
+              icon: const Icon(Icons.refresh),
+              onPressed: _refreshMap,
+            ),
+          ],
+        ),
+        body: _mapController == null
+            ? const Center(child: CircularProgressIndicator())
+            : WebViewWidget(controller: _mapController!),
+      );
+    }
+
     return Scaffold(
       appBar: AppBar(title: const Text('RaahMitra GPS Logger (Flutter)')),
       body: Center(
@@ -227,6 +286,11 @@ class _LoggerHomeState extends State<LoggerHome> with WidgetsBindingObserver {
             ElevatedButton(
               onPressed: _running ? _stop : _start,
               child: Text(_running ? 'Stop logging' : 'Start logging'),
+            ),
+            const SizedBox(height: 12),
+            ElevatedButton(
+              onPressed: _openMap,
+              child: const Text('View Map'),
             ),
             const SizedBox(height: 12),
             ElevatedButton(
