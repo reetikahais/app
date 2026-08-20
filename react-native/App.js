@@ -153,7 +153,15 @@ export default function App() {
   }
 
   async function stop() {
-    await stopWatch();
+    try {
+      await stopWatch();
+    } catch (err) {
+      // Ensure the user's Stop tap always lands, even if the underlying OS task is in a state
+      // stopWatch() couldn't reconcile (its own known TaskNotFoundException case is already
+      // handled inside stopWatch() itself) - getting stuck here left the UI showing RUNNING
+      // forever with no way to retry, worse than logging an error and finishing the stop.
+      console.error('stopWatch failed during stop()', err);
+    }
     await recordHeartbeat('stop_tracking');
     runningRef.current = false;
     setRunning(false);

@@ -25,7 +25,19 @@ export async function startWatch(intervalMs, { highAccuracy = true } = {}) {
 }
 
 export async function stopWatch() {
-  await Location.stopLocationUpdatesAsync(LOCATION_TASK_NAME);
+  try {
+    await Location.stopLocationUpdatesAsync(LOCATION_TASK_NAME);
+  } catch (err) {
+    // OS-killed background services (observed on OnePlus/OxygenOS's aggressive battery
+    // management) unregister the task out from under us without telling this app's JS state -
+    // by the time the user taps Stop, or the next reconcile tick fires, the task may already be
+    // gone. That's already the outcome "stop" wants, not a failure: swallow only this specific
+    // exception so callers (stop(), restartWatchWithOptions()) can still complete their own
+    // bookkeeping instead of getting stuck mid-way with the UI/state never catching up.
+    if (err?.code !== 'ERR_UNEXPECTED' || !String(err?.message ?? '').includes('TaskNotFoundException')) {
+      throw err;
+    }
+  }
 }
 
 export async function restartWatchWithOptions(intervalMs, { highAccuracy = true } = {}) {
