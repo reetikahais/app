@@ -1,2 +1,7 @@
 .DS_Store
 Thumbs.db
+
+# Per-export map snapshots embed real tester GPS coordinates - never commit these.
+tools/exports/
+
+.worktrees/
