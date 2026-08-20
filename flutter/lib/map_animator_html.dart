@@ -50,6 +50,7 @@ String animatorHtml(List<MapPoint> points) {
   .app{display:flex; flex-direction:column; height:100vh;}
   header{display:flex; align-items:center; justify-content:space-between; padding:10px 14px; border-bottom:1px solid var(--line); background:var(--panel-2); flex-shrink:0; gap:12px; flex-wrap:wrap;}
   .stats{display:flex; gap:14px; flex-wrap:wrap; font-size:11px;}
+  .stat .v{font-weight:600;}
   .content{display:flex; flex:1; min-height:0;}
   .map-wrap{flex:1; position:relative; min-width:0;}
   #map{height:100%; width:100%; background:#0b1210;}
