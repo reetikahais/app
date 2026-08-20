@@ -49,7 +49,7 @@ class MapPoint {
   final String? networkType;
   final int? locationQuality;
 
-  late int idx;
+  int? idx;
   bool isLowAcc = false;
   bool isSpike = false;
   bool isSpeedOutlier = false;
@@ -113,20 +113,20 @@ List<MapPoint> buildMapPoints(List<Map<String, Object?>> rows) {
     final t = timestamp != null ? DateTime.tryParse(timestamp)?.millisecondsSinceEpoch : null;
     if (lat == null || lon == null || t == null) continue;
     parsed.add(MapPoint(
-      id: r['id'] as int?,
+      id: (r['id'] as num?)?.toInt(),
       t: t,
       lat: lat,
       lon: lon,
       accuracy: (r['accuracy'] as num?)?.toDouble(),
       movementState: r['movement_state'] as String?,
       method: r['method'] as String?,
-      batteryPct: r['battery'] as int?,
+      batteryPct: (r['battery'] as num?)?.toInt(),
       appState: r['app_state'] as String?,
-      signalDbm: r['signal_dbm'] as int?,
-      signalLevel: r['signal_level'] as int?,
+      signalDbm: (r['signal_dbm'] as num?)?.toInt(),
+      signalLevel: (r['signal_level'] as num?)?.toInt(),
       carrier: r['carrier'] as String?,
       networkType: r['network_type'] as String?,
-      locationQuality: r['location_quality'] as int?,
+      locationQuality: (r['location_quality'] as num?)?.toInt(),
     ));
   }
   parsed.sort((a, b) => a.t.compareTo(b.t));
