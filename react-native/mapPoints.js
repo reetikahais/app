@@ -60,7 +60,7 @@ function markSpeedOutliers(points) {
         if (kmh > MAX_SPEED_KMH) p.isSpeedOutlier = true;
       }
     }
-    if (!p.isSpeedOutlier) prev = p;
+    if (!p.isSpeedOutlier && !p.isLowAcc) prev = p;
   }
 }
 
@@ -99,7 +99,7 @@ export function buildMapPoints(rows) {
   });
 
   deduped.forEach((p) => {
-    p.isLowAcc = p.accuracy != null && p.accuracy > ACCURACY_THRESHOLD_M;
+    p.isLowAcc = p.effAcc > ACCURACY_THRESHOLD_M;
   });
   markSpikes(deduped);
   markSpeedOutliers(deduped);

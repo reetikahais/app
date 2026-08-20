@@ -76,6 +76,13 @@ describe('buildMapPoints', () => {
     expect(points[0].excluded).toBe(false);
   });
 
+  test('invalid (zero/negative) accuracy is treated as untrustworthy, not excellent', () => {
+    const rows = [row({ id: 1, accuracy: 0 })];
+    const points = buildMapPoints(rows);
+    expect(points[0].isLowAcc).toBe(true);
+    expect(points[0].excluded).toBe(true);
+  });
+
   test('flags an isolated out-and-back spike, not its well-behaved neighbors', () => {
     const rows = [
       row({ id: 1, timestamp: '2026-08-19T08:49:15.964Z', latitude: 31.0964199, longitude: 77.1524214, accuracy: 14 }),
@@ -97,6 +104,23 @@ describe('buildMapPoints', () => {
     const points = buildMapPoints(rows);
     expect(points[1].isSpeedOutlier).toBe(true);
     expect(points[1].excluded).toBe(true);
+  });
+
+  test('speed check skips a low-accuracy fix as the reference point, not just spikes', () => {
+    const rows = [
+      // Good fix.
+      row({ id: 1, timestamp: '2026-08-19T08:00:00.000Z', latitude: 31.0, longitude: 77.0, accuracy: 10 }),
+      // Noisy low-accuracy fix, displaced ~200m, moving at a plausible speed so it's not itself a
+      // spike or speed outlier - excluded from path via isLowAcc alone.
+      row({ id: 2, timestamp: '2026-08-19T08:00:10.000Z', latitude: 31.0017966, longitude: 77.0, accuracy: 300 }),
+      // Good fix again, close to fix 1, a few seconds later - should NOT be penalized for the
+      // apparent jump away from fix 2's noisy position.
+      row({ id: 3, timestamp: '2026-08-19T08:00:13.000Z', latitude: 30.9998024, longitude: 77.0, accuracy: 10 }),
+    ];
+    const points = buildMapPoints(rows);
+    expect(points.find((p) => p.id === 2).isLowAcc).toBe(true);
+    expect(points.find((p) => p.id === 2).isSpike).toBeFalsy();
+    expect(points.find((p) => p.id === 3).isSpeedOutlier).toBeFalsy();
   });
 
   test('flags gapBefore when two kept fixes are more than MAX_GAP_SECONDS apart, only on non-excluded points', () => {
