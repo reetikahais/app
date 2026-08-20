@@ -2,6 +2,7 @@ import 'dart:math' as math;
 
 import 'location_task.dart' show maxAccuracyMeters;
 import 'movement_state_machine.dart' show longStationaryIntervalBackgroundMs;
+import 'trajectory_validator.dart' show TrajectoryDecision;
 
 // Pure GPS-fix -> plot-point pipeline. Mirrors react-native/mapPoints.js 1:1, same convention as
 // movement_state_machine.dart mirroring movementStateMachine.js. No I/O, no platform APIs.
@@ -48,11 +49,15 @@ class MapPoint {
   final String? carrier;
   final String? networkType;
   final int? locationQuality;
+  final String? trajectoryDecision;
+  final String? outlierReason;
+  final String? movementMode;
 
   int? idx;
   bool isLowAcc = false;
   bool isSpike = false;
   bool isSpeedOutlier = false;
+  bool isTrajectoryRejected = false;
   bool excluded = false;
   bool gapBefore = false;
   int runIndex = 0;
@@ -72,6 +77,9 @@ class MapPoint {
     required this.carrier,
     required this.networkType,
     required this.locationQuality,
+    this.trajectoryDecision,
+    this.outlierReason,
+    this.movementMode,
   }) : effAcc = _effectiveAccuracy(accuracy);
 }
 
@@ -127,6 +135,9 @@ List<MapPoint> buildMapPoints(List<Map<String, Object?>> rows) {
       carrier: r['carrier'] as String?,
       networkType: r['network_type'] as String?,
       locationQuality: (r['location_quality'] as num?)?.toInt(),
+      trajectoryDecision: r['trajectory_decision'] as String?,
+      outlierReason: r['outlier_reason'] as String?,
+      movementMode: r['movement_mode'] as String?,
     ));
   }
   parsed.sort((a, b) => a.t.compareTo(b.t));
@@ -152,7 +163,13 @@ List<MapPoint> buildMapPoints(List<Map<String, Object?>> rows) {
   for (var idx = 0; idx < deduped.length; idx++) {
     final p = deduped[idx];
     p.idx = idx;
-    p.excluded = p.isSpike || p.isSpeedOutlier || p.isLowAcc;
+    // Step15: a fix the upstream trajectory validator rejected (location_task.dart, before this
+    // row was ever written) must never draw a line segment either - same exclusion mechanism as
+    // the pre-existing spike/speed-outlier/low-accuracy checks above, which stay in place as
+    // defense-in-depth (and for rows written before this field existed).
+    p.isTrajectoryRejected =
+        p.trajectoryDecision == TrajectoryDecision.outlier || p.trajectoryDecision == TrajectoryDecision.uncertain;
+    p.excluded = p.isSpike || p.isSpeedOutlier || p.isLowAcc || p.isTrajectoryRejected;
     if (!p.excluded) {
       p.gapBefore = prevKeptT != null && (p.t - prevKeptT) > maxGapSeconds * 1000;
       if (p.gapBefore) runIndex += 1;

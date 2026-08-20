@@ -4,6 +4,7 @@
 
 import { MAX_ACCURACY_METERS } from './locationFixClassifier';
 import { LONG_STATIONARY_INTERVAL_BACKGROUND_MS } from './movementStateMachine';
+import { TRAJECTORY_DECISION } from './trajectoryValidator';
 
 export const ACCURACY_THRESHOLD_M = MAX_ACCURACY_METERS;
 // Set above the app's own longest legitimate adaptive-poll interval so normal long-stationary
@@ -87,6 +88,9 @@ export function buildMapPoints(rows) {
         carrier: r.carrier ?? null,
         networkType: r.network_type ?? null,
         locationQuality: r.location_quality ?? null,
+        trajectoryDecision: r.trajectory_decision ?? null,
+        outlierReason: r.outlier_reason ?? null,
+        movementMode: r.movement_mode ?? null,
       };
     })
     .filter((p) => p.hasPos && Number.isFinite(p.t))
@@ -108,7 +112,12 @@ export function buildMapPoints(rows) {
   let prevKeptT = null;
   deduped.forEach((p, idx) => {
     p.idx = idx;
-    p.excluded = !!(p.isSpike || p.isSpeedOutlier || p.isLowAcc);
+    // Step15: a fix the upstream trajectory validator rejected (locationTask.js, before this row
+    // was ever written) must never draw a line segment either - same exclusion mechanism as the
+    // pre-existing spike/speed-outlier/low-accuracy checks above, which stay in place as
+    // defense-in-depth (and for rows written before this field existed).
+    p.isTrajectoryRejected = p.trajectoryDecision === TRAJECTORY_DECISION.OUTLIER || p.trajectoryDecision === TRAJECTORY_DECISION.UNCERTAIN;
+    p.excluded = !!(p.isSpike || p.isSpeedOutlier || p.isLowAcc || p.isTrajectoryRejected);
     if (!p.excluded) {
       p.gapBefore = prevKeptT != null && p.t - prevKeptT > MAX_GAP_SECONDS * 1000;
       if (p.gapBefore) runIndex += 1;

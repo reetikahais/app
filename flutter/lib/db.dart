@@ -11,7 +11,7 @@ Future<Database> openLogDb() async {
   final dbPath = await _dbFilePath();
   return openDatabase(
     dbPath,
-    version: 6,
+    version: 7,
     onCreate: (db, version) => db.execute('''
       CREATE TABLE logs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -32,7 +32,12 @@ Future<Database> openLogDb() async {
         processed_longitude REAL,
         distance_from_anchor_m REAL,
         location_quality INTEGER,
-        processing_version INTEGER
+        processing_version INTEGER,
+        trajectory_decision TEXT,
+        outlier_reason TEXT,
+        implied_speed_mps REAL,
+        distance_from_last_accepted_m REAL,
+        movement_mode TEXT
       )
     '''),
     onUpgrade: (db, oldVersion, newVersion) async {
@@ -56,6 +61,13 @@ Future<Database> openLogDb() async {
       }
       if (oldVersion < 6) {
         await db.execute('ALTER TABLE logs ADD COLUMN processing_version INTEGER');
+      }
+      if (oldVersion < 7) {
+        await db.execute('ALTER TABLE logs ADD COLUMN trajectory_decision TEXT');
+        await db.execute('ALTER TABLE logs ADD COLUMN outlier_reason TEXT');
+        await db.execute('ALTER TABLE logs ADD COLUMN implied_speed_mps REAL');
+        await db.execute('ALTER TABLE logs ADD COLUMN distance_from_last_accepted_m REAL');
+        await db.execute('ALTER TABLE logs ADD COLUMN movement_mode TEXT');
       }
     },
   );

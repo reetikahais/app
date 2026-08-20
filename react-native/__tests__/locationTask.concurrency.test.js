@@ -34,10 +34,10 @@ describe('RN location task re-entrancy guard (Round 3, item 8)', () => {
     jest.doMock('../locationWatch', () => ({ LOCATION_TASK_NAME: 'test-location-task' }));
   });
 
-  function makeLocation() {
+  function makeLocation(timestamp) {
     return {
       coords: { latitude: 31.4440206, longitude: 77.0467109, accuracy: 10, speed: null },
-      timestamp: Date.now(),
+      timestamp,
     };
   }
 
@@ -66,8 +66,13 @@ describe('RN location task re-entrancy guard (Round 3, item 8)', () => {
     require('../locationTask');
     const handler = TaskManager.defineTask.mock.calls[0][1];
 
-    const invocationA = handler({ data: { locations: [makeLocation()] }, error: null });
-    const invocationB = handler({ data: { locations: [makeLocation()] }, error: null });
+    // Distinct timestamps: two genuinely separate fixes (as real OS-delivered batches would be),
+    // not a same-instant redelivery - the new trajectory-validation layer (Step3) correctly
+    // treats an identical/duplicate timestamp as suspicious, which is an orthogonal concern to
+    // the movementState re-entrancy race this test targets.
+    const now = Date.now();
+    const invocationA = handler({ data: { locations: [makeLocation(now)] }, error: null });
+    const invocationB = handler({ data: { locations: [makeLocation(now + 10000)] }, error: null });
     await Promise.all([invocationA, invocationB]);
 
     const savedState = JSON.parse(store['movement_state_v1']);

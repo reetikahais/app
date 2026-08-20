@@ -35,6 +35,11 @@ export function getDb() {
       await addColumn('distance_from_anchor_m', 'REAL');
       await addColumn('location_quality', 'INTEGER');
       await addColumn('processing_version', 'INTEGER');
+      await addColumn('trajectory_decision', 'TEXT');
+      await addColumn('outlier_reason', 'TEXT');
+      await addColumn('implied_speed_mps', 'REAL');
+      await addColumn('distance_from_last_accepted_m', 'REAL');
+      await addColumn('movement_mode', 'TEXT');
       return db;
     });
   }
@@ -44,8 +49,8 @@ export function getDb() {
 export async function insertLog(row) {
   const db = await getDb();
   await db.runAsync(
-    `INSERT INTO logs (timestamp, latitude, longitude, accuracy, battery, app_state, method, location, signal_dbm, signal_level, carrier, network_type, movement_state, processed_latitude, processed_longitude, distance_from_anchor_m, location_quality, processing_version)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO logs (timestamp, latitude, longitude, accuracy, battery, app_state, method, location, signal_dbm, signal_level, carrier, network_type, movement_state, processed_latitude, processed_longitude, distance_from_anchor_m, location_quality, processing_version, trajectory_decision, outlier_reason, implied_speed_mps, distance_from_last_accepted_m, movement_mode)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       row.timestamp,
       row.latitude,
@@ -65,6 +70,11 @@ export async function insertLog(row) {
       row.distance_from_anchor_m ?? null,
       row.location_quality ?? null,
       row.processing_version ?? null,
+      row.trajectory_decision ?? null,
+      row.outlier_reason ?? null,
+      row.implied_speed_mps ?? null,
+      row.distance_from_last_accepted_m ?? null,
+      row.movement_mode ?? null,
     ]
   );
 }

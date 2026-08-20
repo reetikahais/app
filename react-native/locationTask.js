@@ -15,12 +15,19 @@ import {
   computePollingIntervalMs,
   PROCESSING_VERSION,
 } from './movementStateMachine';
+import {
+  createInitialTrajectoryState,
+  classifyFix,
+  sortFixesByTimestamp,
+  TRAJECTORY_DECISION,
+} from './trajectoryValidator';
 import { LOCATION_TASK_NAME } from './locationWatch';
 
 export { LOCATION_TASK_NAME };
 export const APP_STATE_KEY = 'app_state';
 export const LOG_INTERVAL_MS = 30000;
 export const MOVEMENT_STATE_KEY = 'movement_state_v1';
+export const TRAJECTORY_STATE_KEY = 'trajectory_state_v1';
 export const DESIRED_INTERVAL_KEY = 'desired_polling_interval_ms';
 export const DESIRED_HIGH_ACCURACY_KEY = 'desired_high_accuracy';
 // Tracks what's actually configured on the native watch right now - written by whichever side
@@ -41,6 +48,19 @@ async function loadMovementState() {
 
 async function saveMovementState(state) {
   await AsyncStorage.setItem(MOVEMENT_STATE_KEY, JSON.stringify(state));
+}
+
+async function loadTrajectoryState() {
+  try {
+    const raw = await AsyncStorage.getItem(TRAJECTORY_STATE_KEY);
+    return raw ? JSON.parse(raw) : createInitialTrajectoryState();
+  } catch (err) {
+    return createInitialTrajectoryState();
+  }
+}
+
+async function saveTrajectoryState(state) {
+  await AsyncStorage.setItem(TRAJECTORY_STATE_KEY, JSON.stringify(state));
 }
 
 // expo-task-manager can invoke this callback again before a previous invocation's
@@ -67,8 +87,16 @@ async function runLocationTask({ data, error }) {
     const batteryLevel = await Battery.getBatteryLevelAsync();
     const signalInfo = await getSignalInfo();
     let movementState = await loadMovementState();
+    let trajectoryState = await loadTrajectoryState();
 
-    for (const location of locations) {
+    // Step3/17: the OS is never guaranteed to deliver a batch in chronological order - sort
+    // before anything touches lastAcceptedFix/movementState so each fix is evaluated against the
+    // one that actually preceded it in time, not delivery order.
+    const sortedLocations = sortFixesByTimestamp(
+      locations.map((location) => ({ ...location, timestampMs: location?.timestamp ?? Date.now() }))
+    );
+
+    for (const location of sortedLocations) {
       const accuracy = location?.coords?.accuracy ?? null;
       const latitude = location?.coords?.latitude ?? null;
       const longitude = location?.coords?.longitude ?? null;
@@ -78,6 +106,11 @@ async function runLocationTask({ data, error }) {
       let processedLongitude = null;
       let distanceFromAnchorM = null;
       let locationQuality = null;
+      let trajectoryDecision = null;
+      let outlierReason = null;
+      let impliedSpeedMps = null;
+      let distanceFromLastAcceptedM = null;
+      let movementMode = null;
 
       if (latitude != null && longitude != null && accuracy != null && accuracy > 0) {
         const speed = location?.coords?.speed;
@@ -86,15 +119,29 @@ async function runLocationTask({ data, error }) {
           lon: longitude,
           accuracy,
           speed: speed != null && speed >= 0 ? speed : null,
-          timestampMs: location?.timestamp ?? Date.now(),
+          timestampMs: location.timestampMs,
         };
-        movementState = processLocationFix(movementState, fix);
-        const processed = getProcessedLocation(movementState);
-        movementStateName = movementState.state;
-        processedLatitude = processed.lat;
-        processedLongitude = processed.lon;
-        distanceFromAnchorM = getDistanceFromAnchorM(movementState, fix);
-        locationQuality = getLocationQuality(movementState, fix);
+
+        // Step2/16: trajectory validation runs BEFORE the movement state machine - only an
+        // ACCEPTED fix is allowed to update lastAcceptedFix, movement state, smoothing, or the
+        // processed trail. OUTLIER/UNCERTAIN fixes are still stored raw below, untouched.
+        const { newState: nextTrajectoryState, result: trajectoryResult } = classifyFix(trajectoryState, fix);
+        trajectoryState = nextTrajectoryState;
+        trajectoryDecision = trajectoryResult.decision;
+        outlierReason = trajectoryResult.reason;
+        impliedSpeedMps = trajectoryResult.impliedSpeedMps;
+        distanceFromLastAcceptedM = trajectoryResult.distanceFromLastAcceptedM;
+        movementMode = trajectoryResult.movementMode;
+
+        if (trajectoryResult.decision === TRAJECTORY_DECISION.ACCEPTED) {
+          movementState = processLocationFix(movementState, fix);
+          const processed = getProcessedLocation(movementState);
+          movementStateName = movementState.state;
+          processedLatitude = processed.lat;
+          processedLongitude = processed.lon;
+          distanceFromAnchorM = getDistanceFromAnchorM(movementState, fix);
+          locationQuality = getLocationQuality(movementState, fix);
+        }
       }
 
       const fixTime = new Date(location.timestamp);
@@ -116,10 +163,16 @@ async function runLocationTask({ data, error }) {
         distance_from_anchor_m: distanceFromAnchorM,
         location_quality: locationQuality,
         processing_version: PROCESSING_VERSION,
+        trajectory_decision: trajectoryDecision,
+        outlier_reason: outlierReason,
+        implied_speed_mps: impliedSpeedMps,
+        distance_from_last_accepted_m: distanceFromLastAcceptedM,
+        movement_mode: movementMode,
       });
     }
 
     await saveMovementState(movementState);
+    await saveTrajectoryState(trajectoryState);
 
     // Confirmed empirically on-device (OnePlus 6): calling stopLocationUpdatesAsync/
     // startLocationUpdatesAsync from inside this task's own callback does not fail cleanly - it
@@ -132,7 +185,7 @@ async function runLocationTask({ data, error }) {
     await AsyncStorage.setItem(DESIRED_INTERVAL_KEY, String(desiredIntervalMs));
     await AsyncStorage.setItem(DESIRED_HIGH_ACCURACY_KEY, desiredHighAccuracy ? '1' : '0');
 
-    const last = locations[locations.length - 1];
+    const last = sortedLocations[sortedLocations.length - 1];
     await logEvent('location_task_fired', {
       batch_size: locations.length,
       latitude: last?.coords?.latitude ?? null,

@@ -14,12 +14,14 @@ import 'package:sqflite/sqflite.dart';
 import 'db.dart';
 import 'logger.dart';
 import 'movement_state_machine.dart';
+import 'trajectory_validator.dart';
 
 const String logIntervalPrefKey = 'log_interval_seconds';
 const int defaultLogIntervalSeconds = 30;
 const String notificationChannelId = 'gps_logger_channel';
 const double maxAccuracyMeters = 50;
 const String movementStatePrefKey = 'movement_state_v1';
+const String trajectoryStatePrefKey = 'trajectory_state_v1';
 
 String classifyFixMethod(double? accuracy) {
   return accuracy != null && accuracy <= maxAccuracyMeters ? 'fused' : 'low_accuracy_fallback';
@@ -37,6 +39,20 @@ Future<MovementState> _loadMovementState(SharedPreferences prefs) async {
 
 Future<void> _saveMovementState(SharedPreferences prefs, MovementState state) async {
   await prefs.setString(movementStatePrefKey, jsonEncode(movementStateToJson(state)));
+}
+
+Future<TrajectoryState> _loadTrajectoryState(SharedPreferences prefs) async {
+  final raw = prefs.getString(trajectoryStatePrefKey);
+  if (raw == null) return createInitialTrajectoryState();
+  try {
+    return trajectoryStateFromJson(jsonDecode(raw) as Map<String, dynamic>);
+  } catch (_) {
+    return createInitialTrajectoryState();
+  }
+}
+
+Future<void> _saveTrajectoryState(SharedPreferences prefs, TrajectoryState state) async {
+  await prefs.setString(trajectoryStatePrefKey, jsonEncode(trajectoryStateToJson(state)));
 }
 
 // Returns the polling interval (seconds) the caller should use for the *next* tick, based on
@@ -83,29 +99,57 @@ Future<int> _logOnce(Database db, int currentIntervalSeconds) async {
   double? processedLongitude;
   double? distanceFromAnchorM;
   int? locationQuality;
+  String? trajectoryDecision;
+  String? outlierReason;
+  double? impliedSpeedMps;
+  double? distanceFromLastAcceptedM;
+  String? movementMode;
   var nextIntervalSeconds = currentIntervalSeconds;
+  var trajectoryState = await _loadTrajectoryState(prefs);
 
   if (position != null && position.accuracy > 0) {
-    final fix = LocationFix(
+    final fix = TrajectoryFix(
       lat: position.latitude,
       lon: position.longitude,
       accuracy: position.accuracy,
       speed: position.speed,
       timestampMs: position.timestamp.millisecondsSinceEpoch,
     );
-    final movementState = processLocationFix(movementStateBeforeThisFix, fix);
-    await _saveMovementState(prefs, movementState);
 
-    final processed = getProcessedLocation(movementState);
-    movementStateName = movementState.state;
-    processedLatitude = processed.lat;
-    processedLongitude = processed.lon;
-    distanceFromAnchorM = getDistanceFromAnchorM(movementState, fix);
-    locationQuality = getLocationQuality(movementState, fix);
+    // Step2/16: trajectory validation runs BEFORE the movement state machine - only an ACCEPTED
+    // fix is allowed to update lastAcceptedFix, movement state, smoothing, or the processed
+    // trail. OUTLIER/UNCERTAIN fixes are still stored raw below, untouched.
+    final trajectoryOutcome = classifyFix(trajectoryState, fix);
+    trajectoryState = trajectoryOutcome.newState;
+    trajectoryDecision = trajectoryOutcome.result.decision;
+    outlierReason = trajectoryOutcome.result.reason;
+    impliedSpeedMps = trajectoryOutcome.result.impliedSpeedMps;
+    distanceFromLastAcceptedM = trajectoryOutcome.result.distanceFromLastAcceptedM;
+    movementMode = trajectoryOutcome.result.movementMode;
 
-    final intervalMs = computePollingIntervalMs(movementState, DateTime.now().millisecondsSinceEpoch, appState);
-    nextIntervalSeconds = (intervalMs / 1000).round();
+    if (trajectoryOutcome.result.decision == TrajectoryDecision.accepted) {
+      final movementFix = LocationFix(
+        lat: position.latitude,
+        lon: position.longitude,
+        accuracy: position.accuracy,
+        speed: position.speed,
+        timestampMs: position.timestamp.millisecondsSinceEpoch,
+      );
+      final movementState = processLocationFix(movementStateBeforeThisFix, movementFix);
+      await _saveMovementState(prefs, movementState);
+
+      final processed = getProcessedLocation(movementState);
+      movementStateName = movementState.state;
+      processedLatitude = processed.lat;
+      processedLongitude = processed.lon;
+      distanceFromAnchorM = getDistanceFromAnchorM(movementState, movementFix);
+      locationQuality = getLocationQuality(movementState, movementFix);
+
+      final intervalMs = computePollingIntervalMs(movementState, DateTime.now().millisecondsSinceEpoch, appState);
+      nextIntervalSeconds = (intervalMs / 1000).round();
+    }
   }
+  await _saveTrajectoryState(prefs, trajectoryState);
 
   await db.insert('logs', {
     'timestamp': (position?.timestamp ?? DateTime.now()).toIso8601String(),
@@ -126,6 +170,11 @@ Future<int> _logOnce(Database db, int currentIntervalSeconds) async {
     'distance_from_anchor_m': distanceFromAnchorM,
     'location_quality': locationQuality,
     'processing_version': processingVersion,
+    'trajectory_decision': trajectoryDecision,
+    'outlier_reason': outlierReason,
+    'implied_speed_mps': impliedSpeedMps,
+    'distance_from_last_accepted_m': distanceFromLastAcceptedM,
+    'movement_mode': movementMode,
   });
 
   await logEvent('location_task_fired', {
