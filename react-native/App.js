@@ -25,12 +25,17 @@ import {
   getAllEvents,
 } from './logger';
 import { debounce } from './debounce';
+import { WebView } from 'react-native-webview';
+import { buildMapPoints } from './mapPoints';
+import { animatorHtml } from './mapAnimatorHtml';
 
 const LIFECYCLE_DEBOUNCE_MS = 300;
 
 export default function App() {
   const [running, setRunning] = useState(false);
   const [count, setCount] = useState(0);
+  const [showMap, setShowMap] = useState(false);
+  const [mapHtml, setMapHtml] = useState(null);
   const appState = useRef(AppState.currentState);
   const runningRef = useRef(false);
 
@@ -181,6 +186,35 @@ export default function App() {
     }
   }
 
+  async function refreshMap() {
+    const logs = await getAllLogs();
+    setMapHtml(animatorHtml(buildMapPoints(logs)));
+  }
+
+  async function openMap() {
+    await refreshMap();
+    setShowMap(true);
+  }
+
+  async function handleMapExport(event) {
+    try {
+      const { format, filename, content } = JSON.parse(event.nativeEvent.data);
+      const canShare = await Sharing.isAvailableAsync();
+      if (!canShare) {
+        Alert.alert('Export failed', 'Sharing is not available on this device.');
+        return;
+      }
+      const file = new File(Paths.document, filename);
+      if (file.exists) file.delete();
+      file.create();
+      file.write(content);
+      await Sharing.shareAsync(file.uri);
+    } catch (err) {
+      console.error('Map export failed', err);
+      Alert.alert('Export failed', String(err?.message ?? err));
+    }
+  }
+
   function confirmClearLogs() {
     Alert.alert(
       'Clear logs?',
@@ -204,12 +238,33 @@ export default function App() {
     );
   }
 
+  if (showMap) {
+    return (
+      <View style={styles.mapContainer}>
+        <View style={styles.mapToolbar}>
+          <Button title="< Back" onPress={() => setShowMap(false)} />
+          <Button title="Refresh" onPress={refreshMap} />
+        </View>
+        {mapHtml && (
+          <WebView
+            originWhitelist={['*']}
+            source={{ html: mapHtml }}
+            onMessage={handleMapExport}
+            style={styles.webview}
+          />
+        )}
+        <StatusBar style="auto" />
+      </View>
+    );
+  }
+
   return (
     <View style={styles.container}>
       <Text style={styles.title}>RaahMitra GPS Logger (React Native)</Text>
       <Text style={styles.status}>{running ? 'RUNNING' : 'STOPPED'}</Text>
       <Text style={styles.count}>Logs written: {count}</Text>
       <Button title={running ? 'Stop logging' : 'Start logging'} onPress={running ? stop : start} />
+      <Button title="View Map" onPress={openMap} />
       <Button title="Export Logs" onPress={exportLogs} />
       <Button title="Clear Logs" color="#c0392b" onPress={confirmClearLogs} />
       <StatusBar style="auto" />
@@ -228,4 +283,21 @@ const styles = StyleSheet.create({
   title: { fontSize: 18, fontWeight: '600', marginBottom: 12, textAlign: 'center' },
   status: { fontSize: 22, fontWeight: 'bold' },
   count: { fontSize: 18 },
+  mapContainer: {
+    flex: 1,
+    width: '100%',
+    backgroundColor: '#fff',
+  },
+  mapToolbar: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    width: '100%',
+    paddingHorizontal: 12,
+    paddingTop: 40,
+    paddingBottom: 8,
+  },
+  webview: {
+    flex: 1,
+    width: '100%',
+  },
 });
