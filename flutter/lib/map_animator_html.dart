@@ -12,6 +12,9 @@ import 'map_points.dart';
 // unreliable in a mobile WebView (RN and Flutter each supply a different message bridge - see the
 // sendExport() shim at the bottom of the generated script).
 
+// Whitelisted to exactly the fields the embedded <script> below reads - if that script starts
+// consuming another MapPoint field (e.g. signalDbm), add it here too, or it'll silently read as
+// undefined in the Flutter WebView while working fine on RN (which JSON.stringifies the whole point).
 Map<String, Object?> _pointToJson(MapPoint p) => {
       'id': p.id,
       't': p.t,
