@@ -113,10 +113,12 @@ void main() {
       return (stateB: outcomeB.newState, distanceM: w.distanceM + 12, timeMs: w.timeMs + 10000);
     }
 
-    test('good, good, 300m jump, good - jump never enters the trail, recovery resumes off the last accepted fix', () {
+    test('good, good, 1000m jump, good - jump never enters the trail, recovery resumes off the last accepted fix', () {
       final b = baseWalk();
 
-      final outcomeC = classifyFix(b.stateB, fixAt(b.distanceM + 300, 0, b.timeMs + 10000, speed: 30));
+      // Implausible even for VEHICLE (100 m/s), so it must stay a flat-out OUTLIER, not become
+      // transition evidence (Step22).
+      final outcomeC = classifyFix(b.stateB, fixAt(b.distanceM + 1000, 0, b.timeMs + 10000, speed: 100));
       expect(outcomeC.result.decision, TrajectoryDecision.outlier);
       expect(outcomeC.newState.lastAcceptedFix!.timestampMs, b.stateB.lastAcceptedFix!.timestampMs);
 
@@ -127,11 +129,14 @@ void main() {
     test('outlier poisoning: two consecutive outliers never become the reference - E is compared to B', () {
       final b = baseWalk();
 
-      final outcomeC = classifyFix(b.stateB, fixAt(b.distanceM + 300, 0, b.timeMs + 10000, speed: 30));
-      final outcomeD = classifyFix(outcomeC.newState, fixAt(b.distanceM + 600, 0, b.timeMs + 20000, speed: 30));
+      // Both implausible even for VEHICLE, so both stay flat-out OUTLIER, not transition evidence.
+      final outcomeC = classifyFix(b.stateB, fixAt(b.distanceM + 1000, 0, b.timeMs + 10000, speed: 100));
+      final outcomeD = classifyFix(outcomeC.newState, fixAt(b.distanceM + 2000, 0, b.timeMs + 20000, speed: 100));
       expect(outcomeD.result.decision, TrajectoryDecision.outlier);
       expect(outcomeD.newState.lastAcceptedFix!.timestampMs, b.stateB.lastAcceptedFix!.timestampMs);
 
+      // If compared to D (2000m away) this would be a huge implausible jump; compared to B it's a
+      // normal, plausible walking step.
       final outcomeE = classifyFix(outcomeD.newState, fixAt(b.distanceM + 24, 0, b.timeMs + 30000, speed: 1.2));
       expect(outcomeE.result.decision, TrajectoryDecision.accepted);
     });
@@ -290,6 +295,98 @@ void main() {
       final boot = classifyFix(createInitialTrajectoryState(), fixAt(0, 0, 0));
       final w = warmUp(boot.newState, 0, 0, 3, 1.2, 10);
       expect(w.state.mode, MovementMode.walking);
+    });
+  });
+
+  group('mode ordering (Step22)', () {
+    test('WALKING has CYCLING and VEHICLE as faster modes, in order', () {
+      expect(nextFasterModes(MovementMode.walking), [MovementMode.cycling, MovementMode.vehicle]);
+    });
+
+    test('CYCLING has only VEHICLE as a faster mode', () {
+      expect(nextFasterModes(MovementMode.cycling), [MovementMode.vehicle]);
+    });
+
+    test('VEHICLE has no faster mode', () {
+      expect(nextFasterModes(MovementMode.vehicle), <String>[]);
+    });
+
+    test("UNKNOWN has no faster mode (its ceiling already equals VEHICLE's)", () {
+      expect(nextFasterModes(MovementMode.unknown), <String>[]);
+    });
+  });
+
+  group('mode-transition buffer opens (Step22)', () {
+    test('a fix implausible for WALKING but plausible for VEHICLE is held, not rejected', () {
+      final boot = classifyFix(createInitialTrajectoryState(), fixAt(0, 0, 0));
+      final w = warmUp(boot.newState, 0, 0, 3, 1.2, 10);
+      expect(w.state.mode, MovementMode.walking);
+      final outcome = classifyFix(w.state, fixAt(w.distanceM + 140, 0, w.timeMs + 10000, speed: 14));
+      expect(outcome.result.decision, TrajectoryDecision.uncertain);
+      expect(outcome.result.reason, OutlierReason.modeTransitionPending);
+      expect(outcome.newState.mode, MovementMode.walking);
+      expect(outcome.newState.transitionBuffer.length, 1);
+      expect(outcome.newState.transitionBuffer[0].candidateMode, MovementMode.vehicle);
+    });
+
+    test('a true teleport (implausible even for VEHICLE) is still rejected outright', () {
+      final boot = classifyFix(createInitialTrajectoryState(), fixAt(0, 0, 0));
+      final w = warmUp(boot.newState, 0, 0, 3, 1.2, 10);
+      final outcome = classifyFix(w.state, fixAt(w.distanceM + 1700, 0, w.timeMs + 5000, speed: 340));
+      expect(outcome.result.decision, TrajectoryDecision.outlier);
+      expect(outcome.newState.transitionBuffer.length, 0);
+    });
+  });
+
+  group('mode-transition buffer resolves (Step22)', () {
+    test('3 mutually-consistent faster fixes confirm the new mode', () {
+      final boot = classifyFix(createInitialTrajectoryState(), fixAt(0, 0, 0));
+      final w = warmUp(boot.newState, 0, 0, 3, 1.2, 10);
+      final s1 = classifyFix(w.state, fixAt(w.distanceM + 140, 0, w.timeMs + 10000, speed: 14));
+      expect(s1.result.reason, OutlierReason.modeTransitionPending);
+      final s2 = classifyFix(s1.newState, fixAt(w.distanceM + 300, 0, w.timeMs + 20000, speed: 16));
+      expect(s2.result.reason, OutlierReason.modeTransitionPending);
+      expect(s2.newState.transitionBuffer.length, 2);
+      final fix3 = fixAt(w.distanceM + 480, 0, w.timeMs + 30000, speed: 18);
+      final s3 = classifyFix(s2.newState, fix3);
+      expect(s3.result.decision, TrajectoryDecision.accepted);
+      expect(s3.result.reason, OutlierReason.modeTransitionConfirmed);
+      expect(s3.newState.mode, MovementMode.vehicle);
+      expect(s3.newState.transitionBuffer.length, 0);
+      expect(s3.newState.lastAcceptedFix!.lat, closeTo(fix3.lat, 1e-9));
+    });
+
+    test('an isolated spike-and-return never confirms a mode switch', () {
+      final boot = classifyFix(createInitialTrajectoryState(), fixAt(0, 0, 0));
+      final w = warmUp(boot.newState, 0, 0, 3, 1.2, 10);
+      final s1 = classifyFix(w.state, fixAt(w.distanceM + 150, 0, w.timeMs + 5000, speed: 30));
+      expect(s1.result.reason, OutlierReason.modeTransitionPending);
+      expect(s1.newState.transitionBuffer.length, 1);
+      final s2 = classifyFix(s1.newState, fixAt(w.distanceM + 13, 0, w.timeMs + 10000, speed: 1.3));
+      expect(s2.result.decision, TrajectoryDecision.accepted);
+      expect(s2.newState.mode, MovementMode.walking);
+      expect(s2.newState.transitionBuffer.length, 0);
+    });
+
+    test('an unconfirmed buffer older than modeTransitionBufferMaxAgeMs is discarded, not carried forward', () {
+      final boot = classifyFix(createInitialTrajectoryState(), fixAt(0, 0, 0));
+      final w = warmUp(boot.newState, 0, 0, 3, 1.2, 10);
+      final s1 = classifyFix(w.state, fixAt(w.distanceM + 140, 0, w.timeMs + 10000, speed: 14));
+      expect(s1.newState.transitionBuffer.length, 1);
+      final s2 = classifyFix(s1.newState, fixAt(w.distanceM + 300, 0, w.timeMs + 75000, speed: 16));
+      expect(s2.newState.transitionBuffer.length, isNot(2));
+      expect(s2.newState.mode, MovementMode.walking);
+    });
+
+    test('an out-of-order fix while a buffer is open is rejected, buffer untouched', () {
+      final boot = classifyFix(createInitialTrajectoryState(), fixAt(0, 0, 0));
+      final w = warmUp(boot.newState, 0, 0, 3, 1.2, 10);
+      final s1 = classifyFix(w.state, fixAt(w.distanceM + 140, 0, w.timeMs + 10000, speed: 14));
+      expect(s1.newState.transitionBuffer.length, 1);
+      final outcome = classifyFix(s1.newState, fixAt(w.distanceM + 145, 0, w.timeMs + 10000, speed: 14));
+      expect(outcome.result.decision, TrajectoryDecision.outlier);
+      expect(outcome.result.reason, OutlierReason.duplicateOrOutOfOrder);
+      expect(outcome.newState.transitionBuffer.length, 1);
     });
   });
 }

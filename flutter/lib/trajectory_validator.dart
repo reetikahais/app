@@ -24,6 +24,8 @@ class OutlierReason {
   static const String staleAnchorRecovering = 'STALE_ANCHOR_RECOVERING';
   static const String staleAnchorReanchored = 'STALE_ANCHOR_REANCHORED';
   static const String uncertainConfirmed = 'UNCERTAIN_CONFIRMED';
+  static const String modeTransitionPending = 'MODE_TRANSITION_PENDING';
+  static const String modeTransitionConfirmed = 'MODE_TRANSITION_CONFIRMED';
 }
 
 class MovementMode {
@@ -88,6 +90,23 @@ const int uncertainConfirmTimeoutFixes = 2;
 const double borderlineRatio = 0.8;
 const double speedDisagreementRatio = 0.6;
 const double speedDisagreementSlackMps = 2;
+
+// Step22: mode-transition evidence - a fix implausible for the current mode isn't immediately
+// OUTLIER/UNCERTAIN if it's plausible for a faster mode; it's buffered instead (see
+// _openTransitionBuffer/_resolveTransitionBuffer below), and only a run of modeSwitchConfirmCount
+// mutually-consistent faster-mode fixes actually switches the mode. Reuses
+// modeSwitchConfirmCount (3) as the buffer's confirm size - this buffer IS this transition's
+// hysteresis, the same bar the normal (accepted-fixes-only) mode-switch path already uses.
+const int modeTransitionBufferMaxAgeMs = 60000;
+
+const List<String> _modeOrder = [MovementMode.walking, MovementMode.cycling, MovementMode.vehicle];
+
+// UNKNOWN has no "faster" mode - its ceiling already equals VEHICLE's (see unknownMaxSpeedMps),
+// so transition evidence never needs to run while mode is still UNKNOWN.
+List<String> nextFasterModes(String mode) {
+  final idx = _modeOrder.indexOf(mode);
+  return idx == -1 ? const [] : _modeOrder.sublist(idx + 1);
+}
 
 double _ceilingForMode(String mode) {
   switch (mode) {
@@ -158,6 +177,13 @@ class PendingUncertainFix {
   const PendingUncertainFix({required this.fix, required this.age, required this.staleRecovery});
 }
 
+// Step22: one held candidate-faster-mode fix inside TrajectoryState.transitionBuffer.
+class TransitionBufferEntry {
+  final TrajectoryFix fix;
+  final String candidateMode;
+  const TransitionBufferEntry({required this.fix, required this.candidateMode});
+}
+
 class TrajectoryState {
   final TrajectoryFix? lastAcceptedFix;
   final TrajectoryFix? prevAcceptedFix;
@@ -167,6 +193,7 @@ class TrajectoryState {
   final String? candidateMode;
   final PendingUncertainFix? pendingUncertain;
   final int outlierStreak;
+  final List<TransitionBufferEntry> transitionBuffer;
 
   const TrajectoryState({
     this.lastAcceptedFix,
@@ -177,6 +204,7 @@ class TrajectoryState {
     this.candidateMode,
     this.pendingUncertain,
     this.outlierStreak = 0,
+    this.transitionBuffer = const [],
   });
 
   TrajectoryState copyWith({
@@ -192,6 +220,7 @@ class TrajectoryState {
     PendingUncertainFix? pendingUncertain,
     bool clearPendingUncertain = false,
     int? outlierStreak,
+    List<TransitionBufferEntry>? transitionBuffer,
   }) {
     return TrajectoryState(
       lastAcceptedFix: clearLastAcceptedFix ? null : (lastAcceptedFix ?? this.lastAcceptedFix),
@@ -202,6 +231,7 @@ class TrajectoryState {
       candidateMode: clearCandidateMode ? null : (candidateMode ?? this.candidateMode),
       pendingUncertain: clearPendingUncertain ? null : (pendingUncertain ?? this.pendingUncertain),
       outlierStreak: outlierStreak ?? this.outlierStreak,
+      transitionBuffer: transitionBuffer ?? this.transitionBuffer,
     );
   }
 }
@@ -439,6 +469,114 @@ TrajectoryOutcome _resolvePending(TrajectoryState trajState, TrajectoryFix fix) 
   );
 }
 
+// Step22: a fix rejected against the CURRENT mode's ceiling may still be genuine evidence of a
+// real transport-mode change (walking -> vehicle) rather than noise. Picks the candidate mode via
+// _candidateModeForAvgSpeed (the SAME inference-band scale _resolveTransitionBuffer's band-match
+// check below uses) rather than _ceilingForMode's own generous plausibility scale - the two scales
+// disagree (e.g. 14 m/s passes CYCLING's loose ceiling but reads as VEHICLE-band on the inference
+// scale), so picking by ceiling here would open a buffer under a candidateMode that a later
+// same-mode segment could never actually band-match against. Returns null if the fix's own pace
+// isn't even a faster mode than the current one, or if it's implausible even against that
+// candidate's ceiling (a true teleport) - the caller's existing OUTLIER/UNCERTAIN result then
+// stands unchanged.
+TrajectoryOutcome? _openTransitionBuffer(TrajectoryState trajState, TrajectoryFix fix) {
+  final metrics = computeTrajectoryMetrics(trajState.lastAcceptedFix!, fix);
+  final candidateMode = _candidateModeForAvgSpeed(metrics.impliedSpeedMps);
+  if (!nextFasterModes(trajState.mode).contains(candidateMode)) return null;
+
+  final vsCandidate = _classifyAgainstReference(
+    refFix: trajState.lastAcceptedFix!,
+    prevFix: trajState.prevAcceptedFix,
+    fix: fix,
+    mode: candidateMode,
+  );
+  if (vsCandidate.decision != TrajectoryDecision.accepted) return null;
+
+  return TrajectoryOutcome(
+    newState: trajState.copyWith(transitionBuffer: [TransitionBufferEntry(fix: fix, candidateMode: candidateMode)]),
+    result: TrajectoryResult(
+      decision: TrajectoryDecision.uncertain,
+      reason: OutlierReason.modeTransitionPending,
+      distanceFromLastAcceptedM: vsCandidate.distanceM,
+      impliedSpeedMps: vsCandidate.impliedSpeedMps,
+      movementMode: trajState.mode,
+    ),
+  );
+}
+
+// Step22: extends, confirms, or discards a run of candidate-faster-mode fixes. Confirmation
+// requires ALL of: (1) plausible distance from the last buffered fix at the candidate mode's own
+// ceiling; (2) the segment's own implied speed independently lands in the candidate mode's
+// inference band (_candidateModeForAvgSpeed) - stops a single wide ceiling (e.g. VEHICLE) from
+// rubber-stamping a fix that's actually walking-slow; (3) bearing continuity relative to the fix
+// before the one being compared against - checked unconditionally, not just on borderline cases,
+// since a genuine mode transition keeps heading the same way, while a GPS spike-and-return
+// reverses bearing back toward where the walker actually was (the "1.3 -> 25 -> 1.4" case - see
+// design doc for why _classifyAgainstReference's own borderline-only bearing check isn't enough
+// here).
+TrajectoryOutcome _resolveTransitionBuffer(TrajectoryState trajState, TrajectoryFix fix) {
+  final buffer = trajState.transitionBuffer;
+  final first = buffer[0];
+
+  if (fix.timestampMs - first.fix.timestampMs > modeTransitionBufferMaxAgeMs) {
+    return classifyFix(trajState.copyWith(transitionBuffer: const []), fix);
+  }
+
+  final candidateMode = first.candidateMode;
+  final last = buffer[buffer.length - 1];
+
+  // Duplicate/out-of-order guard against the buffer's own newest entry - mirrors Step3's guard
+  // in classifyFix. Without this, computeTrajectoryMetrics clamps elapsed time to 1ms for a
+  // stale/duplicate fix, collapsing the plausibility ceiling to accuracy slack alone, which a
+  // small-drift fix can still pass (and the bearing check short-circuits false under
+  // minBearingDistanceM) - letting a fabricated segment extend or confirm the buffer.
+  if (fix.timestampMs <= last.fix.timestampMs) {
+    return _outlierFix(trajState, OutlierReason.duplicateOrOutOfOrder, null, null);
+  }
+
+  final prevFix = buffer.length >= 2 ? buffer[buffer.length - 2].fix : trajState.lastAcceptedFix!;
+
+  final vsLast = _classifyAgainstReference(refFix: last.fix, prevFix: prevFix, fix: fix, mode: candidateMode);
+  final bandMatches = _candidateModeForAvgSpeed(vsLast.impliedSpeedMps) == candidateMode;
+  final bearingOk = !_bearingInconsistent(prevFix, last.fix, fix, vsLast.distanceM);
+
+  if (vsLast.decision != TrajectoryDecision.accepted || !bandMatches || !bearingOk) {
+    return classifyFix(trajState.copyWith(transitionBuffer: const []), fix);
+  }
+
+  final nextBuffer = [...buffer, TransitionBufferEntry(fix: fix, candidateMode: candidateMode)];
+  if (nextBuffer.length < modeSwitchConfirmCount) {
+    return TrajectoryOutcome(
+      newState: trajState.copyWith(transitionBuffer: nextBuffer),
+      result: TrajectoryResult(
+        decision: TrajectoryDecision.uncertain,
+        reason: OutlierReason.modeTransitionPending,
+        distanceFromLastAcceptedM: vsLast.distanceM,
+        impliedSpeedMps: vsLast.impliedSpeedMps,
+        movementMode: trajState.mode,
+      ),
+    );
+  }
+
+  // Seed the confirmed mode's speed history from the buffer's own evidence (excluding the
+  // confirming fix itself - _acceptFix's _updateMode call below appends that one via its normal
+  // impliedSpeedMps parameter, so seeding it here too would double-count it).
+  final seeded = nextBuffer.sublist(0, nextBuffer.length - 1);
+  final speedHistory = <double>[
+    for (var i = 0; i < seeded.length; i++)
+      computeTrajectoryMetrics(i == 0 ? trajState.lastAcceptedFix! : seeded[i - 1].fix, seeded[i].fix).impliedSpeedMps,
+  ];
+
+  final confirmed = trajState.copyWith(
+    mode: candidateMode,
+    speedHistory: speedHistory,
+    clearCandidateMode: true,
+    modeStreak: 0,
+    transitionBuffer: const [],
+  );
+  return _acceptFix(confirmed, fix, OutlierReason.modeTransitionConfirmed, vsLast.distanceM, vsLast.impliedSpeedMps);
+}
+
 // Step1-21 entry point. Result carries the Step14/20 diagnostics fields (decision, reason,
 // distanceFromLastAcceptedM, impliedSpeedMps, movementMode). Caller must only feed the fix into
 // the movement state machine / smoothing / processed trail when result.decision ==
@@ -458,6 +596,10 @@ TrajectoryOutcome classifyFix(TrajectoryState trajState, TrajectoryFix rawFix) {
 
   if (trajState.pendingUncertain != null) {
     return _resolvePending(trajState, fix);
+  }
+
+  if (trajState.transitionBuffer.isNotEmpty) {
+    return _resolveTransitionBuffer(trajState, fix);
   }
 
   // Step8: stale-anchor exception - the reference point is no longer comparable, so stop
@@ -489,6 +631,11 @@ TrajectoryOutcome classifyFix(TrajectoryState trajState, TrajectoryFix rawFix) {
     return _acceptFix(trajState, fix, null, outcome.distanceM, outcome.impliedSpeedMps);
   }
   if (outcome.decision == TrajectoryDecision.outlier) {
+    // Only an outright rejection is eligible to become transition evidence - a softer UNCERTAIN
+    // (LOW_CONFIDENCE) outcome already has its own resolution path below (pendingUncertain /
+    // _resolvePending's UNCERTAIN_CONFIRMED chain) and must not be pre-empted by it.
+    final transitionCandidate = _openTransitionBuffer(trajState, fix);
+    if (transitionCandidate != null) return transitionCandidate;
     return _outlierFix(trajState, outcome.reason, outcome.distanceM, outcome.impliedSpeedMps);
   }
   return TrajectoryOutcome(
@@ -531,6 +678,9 @@ Map<String, dynamic> trajectoryStateToJson(TrajectoryState s) => {
             }
           : null,
       'outlierStreak': s.outlierStreak,
+      'transitionBuffer': s.transitionBuffer
+          .map((e) => {'fix': e.fix.toJson(), 'candidateMode': e.candidateMode})
+          .toList(),
     };
 
 TrajectoryState trajectoryStateFromJson(Map<String, dynamic> j) => TrajectoryState(
@@ -548,4 +698,12 @@ TrajectoryState trajectoryStateFromJson(Map<String, dynamic> j) => TrajectorySta
             )
           : null,
       outlierStreak: (j['outlierStreak'] as num).toInt(),
+      transitionBuffer: j['transitionBuffer'] != null
+          ? (j['transitionBuffer'] as List)
+              .map((e) => TransitionBufferEntry(
+                    fix: TrajectoryFix.fromJson((e as Map<String, dynamic>)['fix'] as Map<String, dynamic>),
+                    candidateMode: (e as Map<String, dynamic>)['candidateMode'] as String,
+                  ))
+              .toList()
+          : const [],
     );
