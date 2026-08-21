@@ -399,6 +399,16 @@ function resolveTransitionBuffer(trajState, fix) {
 
   const candidateMode = first.candidateMode;
   const last = buffer[buffer.length - 1];
+
+  // Duplicate/out-of-order guard against the buffer's own newest entry - mirrors Step3's guard
+  // in classifyFix. Without this, computeTrajectoryMetrics clamps elapsed time to 1ms for a
+  // stale/duplicate fix, collapsing the plausibility ceiling to accuracy slack alone, which a
+  // small-drift fix can still pass (and the bearing check short-circuits false under
+  // MIN_BEARING_DISTANCE_M) - letting a fabricated segment extend or confirm the buffer.
+  if (fix.timestampMs <= last.fix.timestampMs) {
+    return outlierFix(trajState, fix, OUTLIER_REASON.DUPLICATE_OR_OUT_OF_ORDER, null, null);
+  }
+
   const prevFix = buffer.length >= 2 ? buffer[buffer.length - 2].fix : trajState.lastAcceptedFix;
 
   const vsLast = classifyAgainstReference({ refFix: last.fix, prevFix, fix, mode: candidateMode });

@@ -433,4 +433,21 @@ describe('mode-transition buffer resolves (Step22)', () => {
     expect(s2.newState.transitionBuffer).not.toHaveLength(2);
     expect(s2.newState.mode).toBe(MOVEMENT_MODE.WALKING);
   });
+
+  test('an out-of-order fix while a buffer is open is rejected, buffer untouched', () => {
+    const boot = classifyFix(createInitialTrajectoryState(), fixAt(0, 0, 0));
+    const { state, distanceM, timeMs } = warmUp(boot.newState, 0, 0, 3, 1.2, 10);
+
+    // fix1 opens a VEHICLE buffer at timeMs + 10000.
+    const s1 = classifyFix(state, fixAt(distanceM + 140, 0, timeMs + 10000, { speed: 14 }));
+    expect(s1.newState.transitionBuffer).toHaveLength(1);
+
+    // fix2 arrives with a timestamp at-or-before fix1's - out of order relative to the buffer's
+    // own last entry, even though it's still after the original anchor.
+    const { newState, result } = classifyFix(s1.newState, fixAt(distanceM + 145, 0, timeMs + 10000, { speed: 14 }));
+
+    expect(result.decision).toBe(TRAJECTORY_DECISION.OUTLIER);
+    expect(result.reason).toBe(OUTLIER_REASON.DUPLICATE_OR_OUT_OF_ORDER);
+    expect(newState.transitionBuffer).toHaveLength(1); // buffer left untouched, not cleared
+  });
 });
