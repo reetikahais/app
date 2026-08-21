@@ -379,6 +379,70 @@ function openTransitionBuffer(trajState, fix) {
   };
 }
 
+// Step22: extends, confirms, or discards a run of candidate-faster-mode fixes. Confirmation
+// requires ALL of: (1) plausible distance from the last buffered fix at the candidate mode's own
+// ceiling; (2) the segment's own implied speed independently lands in the candidate mode's
+// inference band (candidateModeForAvgSpeed) - stops a single wide ceiling (e.g. VEHICLE) from
+// rubber-stamping a fix that's actually walking-slow; (3) bearing continuity relative to the fix
+// before the one being compared against - checked unconditionally, not just on borderline cases,
+// since a genuine mode transition keeps heading the same way, while a GPS spike-and-return
+// reverses bearing back toward where the walker actually was (the "1.3 -> 25 -> 1.4" case - see
+// design doc for why classifyAgainstReference's own borderline-only bearing check isn't enough
+// here).
+function resolveTransitionBuffer(trajState, fix) {
+  const buffer = trajState.transitionBuffer;
+  const first = buffer[0];
+
+  if (fix.timestampMs - first.fix.timestampMs > MODE_TRANSITION_BUFFER_MAX_AGE_MS) {
+    return classifyFix({ ...trajState, transitionBuffer: [] }, fix);
+  }
+
+  const candidateMode = first.candidateMode;
+  const last = buffer[buffer.length - 1];
+  const prevFix = buffer.length >= 2 ? buffer[buffer.length - 2].fix : trajState.lastAcceptedFix;
+
+  const vsLast = classifyAgainstReference({ refFix: last.fix, prevFix, fix, mode: candidateMode });
+  const bandMatches = candidateModeForAvgSpeed(vsLast.impliedSpeedMps) === candidateMode;
+  const bearingOk = !bearingInconsistent(prevFix, last.fix, fix, vsLast.distanceM);
+
+  if (vsLast.decision !== TRAJECTORY_DECISION.ACCEPTED || !bandMatches || !bearingOk) {
+    return classifyFix({ ...trajState, transitionBuffer: [] }, fix);
+  }
+
+  const nextBuffer = [...buffer, { fix, candidateMode }];
+  if (nextBuffer.length < MODE_SWITCH_CONFIRM_COUNT) {
+    return {
+      newState: { ...trajState, transitionBuffer: nextBuffer },
+      result: {
+        decision: TRAJECTORY_DECISION.UNCERTAIN,
+        reason: OUTLIER_REASON.MODE_TRANSITION_PENDING,
+        distanceFromLastAcceptedM: vsLast.distanceM,
+        impliedSpeedMps: vsLast.impliedSpeedMps,
+        movementMode: trajState.mode,
+      },
+    };
+  }
+
+  // Seed the confirmed mode's speed history from the buffer's own evidence (excluding the
+  // confirming fix itself - acceptFix's updateMode call below appends that one via its normal
+  // impliedSpeedMps parameter, so seeding it here too would double-count it).
+  const seeded = nextBuffer.slice(0, -1);
+  const speedHistory = seeded.map((entry, i) => {
+    const ref = i === 0 ? trajState.lastAcceptedFix : seeded[i - 1].fix;
+    return computeTrajectoryMetrics(ref, entry.fix).impliedSpeedMps;
+  });
+
+  const confirmed = {
+    ...trajState,
+    mode: candidateMode,
+    speedHistory,
+    candidateMode: null,
+    modeStreak: 0,
+    transitionBuffer: [],
+  };
+  return acceptFix(confirmed, fix, OUTLIER_REASON.MODE_TRANSITION_CONFIRMED, vsLast.distanceM, vsLast.impliedSpeedMps);
+}
+
 // Step1-21 entry point. Returns { newState, result } - result carries the Step14/20 diagnostics
 // fields (decision, reason, distanceFromLastAcceptedM, impliedSpeedMps, movementMode). Caller
 // must only feed the fix into the movement state machine / smoothing / processed trail when
@@ -398,6 +462,10 @@ export function classifyFix(trajState, rawFix) {
 
   if (trajState.pendingUncertain) {
     return resolvePending(trajState, fix);
+  }
+
+  if (trajState.transitionBuffer.length > 0) {
+    return resolveTransitionBuffer(trajState, fix);
   }
 
   // Step8: stale-anchor exception - the reference point is no longer comparable, so stop

@@ -372,3 +372,65 @@ describe('mode-transition buffer opens (Step22)', () => {
     expect(newState.transitionBuffer).toHaveLength(0);
   });
 });
+
+describe('mode-transition buffer resolves (Step22)', () => {
+  test('3 mutually-consistent faster fixes confirm the new mode', () => {
+    const boot = classifyFix(createInitialTrajectoryState(), fixAt(0, 0, 0));
+    const { state, distanceM, timeMs } = warmUp(boot.newState, 0, 0, 3, 1.2, 10);
+
+    // fix1: 140m/10s from the anchor = 14 m/s -> opens a VEHICLE transition buffer.
+    const s1 = classifyFix(state, fixAt(distanceM + 140, 0, timeMs + 10000, { speed: 14 }));
+    expect(s1.result.reason).toBe(OUTLIER_REASON.MODE_TRANSITION_PENDING);
+
+    // fix2: +160m/10s = 16 m/s from fix1 -> still VEHICLE-band, same bearing, extends the buffer.
+    const s2 = classifyFix(s1.newState, fixAt(distanceM + 300, 0, timeMs + 20000, { speed: 16 }));
+    expect(s2.result.reason).toBe(OUTLIER_REASON.MODE_TRANSITION_PENDING);
+    expect(s2.newState.transitionBuffer).toHaveLength(2);
+
+    // fix3: +180m/10s = 18 m/s from fix2 -> 3rd consistent fix confirms VEHICLE.
+    const fix3 = fixAt(distanceM + 480, 0, timeMs + 30000, { speed: 18 });
+    const s3 = classifyFix(s2.newState, fix3);
+    expect(s3.result.decision).toBe(TRAJECTORY_DECISION.ACCEPTED);
+    expect(s3.result.reason).toBe(OUTLIER_REASON.MODE_TRANSITION_CONFIRMED);
+    expect(s3.newState.mode).toBe(MOVEMENT_MODE.VEHICLE);
+    expect(s3.newState.transitionBuffer).toHaveLength(0);
+    expect(s3.newState.lastAcceptedFix.lat).toBeCloseTo(fix3.lat, 9);
+  });
+
+  test('an isolated spike-and-return never confirms a mode switch', () => {
+    const boot = classifyFix(createInitialTrajectoryState(), fixAt(0, 0, 0));
+    const { state, distanceM, timeMs } = warmUp(boot.newState, 0, 0, 3, 1.2, 10);
+
+    // spike: 150m/5s from the anchor = 30 m/s -> opens a VEHICLE transition buffer.
+    const s1 = classifyFix(state, fixAt(distanceM + 150, 0, timeMs + 5000, { speed: 30 }));
+    expect(s1.result.reason).toBe(OUTLIER_REASON.MODE_TRANSITION_PENDING);
+    expect(s1.newState.transitionBuffer).toHaveLength(1);
+
+    // recover: back near where normal walking from the ORIGINAL anchor would put it (13m over
+    // the full 10s since the anchor = 1.3 m/s) - relative to the spike this reverses bearing by
+    // ~180 degrees, discarding the buffer outright (the band-match check alone would NOT catch
+    // this: 150m/5s back down to 13m over the next 5s is still a ~27m/s segment, itself still
+    // VEHICLE-band - bearing is what actually catches the "teleported out and back" signature).
+    const s2 = classifyFix(s1.newState, fixAt(distanceM + 13, 0, timeMs + 10000, { speed: 1.3 }));
+
+    expect(s2.result.decision).toBe(TRAJECTORY_DECISION.ACCEPTED);
+    expect(s2.newState.mode).toBe(MOVEMENT_MODE.WALKING);
+    expect(s2.newState.transitionBuffer).toHaveLength(0);
+  });
+
+  test('an unconfirmed buffer older than MODE_TRANSITION_BUFFER_MAX_AGE_MS is discarded, not carried forward', () => {
+    const boot = classifyFix(createInitialTrajectoryState(), fixAt(0, 0, 0));
+    const { state, distanceM, timeMs } = warmUp(boot.newState, 0, 0, 3, 1.2, 10);
+
+    // fix1 opens a VEHICLE buffer.
+    const s1 = classifyFix(state, fixAt(distanceM + 140, 0, timeMs + 10000, { speed: 14 }));
+    expect(s1.newState.transitionBuffer).toHaveLength(1);
+
+    // fix2 arrives 65s after fix1 (> MODE_TRANSITION_BUFFER_MAX_AGE_MS = 60000) - even though it
+    // would otherwise look consistent, the stale buffer must be thrown away, not extended.
+    const s2 = classifyFix(s1.newState, fixAt(distanceM + 300, 0, timeMs + 75000, { speed: 16 }));
+
+    expect(s2.newState.transitionBuffer).not.toHaveLength(2);
+    expect(s2.newState.mode).toBe(MOVEMENT_MODE.WALKING);
+  });
+});
