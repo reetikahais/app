@@ -69,9 +69,9 @@ describe('walking mode', () => {
     expect(result.decision).not.toBe(TRAJECTORY_DECISION.OUTLIER);
   });
 
-  test('300m/10s is an outlier (impossible speed for a walking trail)', () => {
+  test('1000m/10s is an outlier (impossible speed even for a car, not just a walking trail)', () => {
     const { state, distanceM, timeMs } = walkingState();
-    const { result } = classifyFix(state, fixAt(distanceM + 300, 0, timeMs + 10000, { speed: 30 }));
+    const { result } = classifyFix(state, fixAt(distanceM + 1000, 0, timeMs + 10000, { speed: 100 }));
     expect(result.decision).toBe(TRAJECTORY_DECISION.OUTLIER);
     expect(result.reason).toBe(OUTLIER_REASON.IMPOSSIBLE_SPEED);
   });
@@ -125,10 +125,12 @@ describe('GPS jump / outlier poisoning', () => {
     return { stateB, distanceM: warmed.distanceM + 12, timeMs: warmed.timeMs + 10000 };
   }
 
-  test('good, good, 300m jump, good - jump never enters the trail, recovery resumes off the last accepted fix', () => {
+  test('good, good, 1000m jump, good - jump never enters the trail, recovery resumes off the last accepted fix', () => {
     const { stateB, distanceM, timeMs } = baseWalk();
 
-    const fC = fixAt(distanceM + 300, 0, timeMs + 10000, { speed: 30 });
+    // Implausible even for VEHICLE (100 m/s), so it must stay a flat-out OUTLIER, not become
+    // transition evidence (Step22).
+    const fC = fixAt(distanceM + 1000, 0, timeMs + 10000, { speed: 100 });
     const { newState: stateC, result: resultC } = classifyFix(stateB, fC);
     expect(resultC.decision).toBe(TRAJECTORY_DECISION.OUTLIER);
     expect(stateC.lastAcceptedFix).toEqual(stateB.lastAcceptedFix);
@@ -141,15 +143,16 @@ describe('GPS jump / outlier poisoning', () => {
   test('outlier poisoning: two consecutive outliers never become the reference - E is compared to B', () => {
     const { stateB, distanceM, timeMs } = baseWalk();
 
-    const fC = fixAt(distanceM + 300, 0, timeMs + 10000, { speed: 30 });
+    // Both implausible even for VEHICLE, so both stay flat-out OUTLIER, not transition evidence.
+    const fC = fixAt(distanceM + 1000, 0, timeMs + 10000, { speed: 100 });
     const { newState: stateC } = classifyFix(stateB, fC);
 
-    const fD = fixAt(distanceM + 600, 0, timeMs + 20000, { speed: 30 });
+    const fD = fixAt(distanceM + 2000, 0, timeMs + 20000, { speed: 100 });
     const { newState: stateD, result: resultD } = classifyFix(stateC, fD);
     expect(resultD.decision).toBe(TRAJECTORY_DECISION.OUTLIER);
     expect(stateD.lastAcceptedFix).toEqual(stateB.lastAcceptedFix);
 
-    // If compared to D (600m away) this would be a huge implausible jump; compared to B it's a
+    // If compared to D (2000m away) this would be a huge implausible jump; compared to B it's a
     // normal, plausible walking step.
     const fE = fixAt(distanceM + 24, 0, timeMs + 30000, { speed: 1.2 });
     const { result: resultE } = classifyFix(stateD, fE);
@@ -337,5 +340,35 @@ describe('mode ordering (Step22)', () => {
 
   test('UNKNOWN has no faster mode (its ceiling already equals VEHICLE\'s)', () => {
     expect(nextFasterModes(MOVEMENT_MODE.UNKNOWN)).toEqual([]);
+  });
+});
+
+describe('mode-transition buffer opens (Step22)', () => {
+  test('a fix implausible for WALKING but plausible for VEHICLE is held, not rejected', () => {
+    const boot = classifyFix(createInitialTrajectoryState(), fixAt(0, 0, 0));
+    const { state, distanceM, timeMs } = warmUp(boot.newState, 0, 0, 3, 1.2, 10);
+    expect(state.mode).toBe(MOVEMENT_MODE.WALKING);
+
+    // 140m in 10s from the anchor = 14 m/s: implausible for WALKING (ceiling 3.5 m/s). Its own
+    // pace independently reads as VEHICLE-band (candidateModeForAvgSpeed, >8 m/s), and is
+    // plausible against VEHICLE's ceiling too.
+    const { newState, result } = classifyFix(state, fixAt(distanceM + 140, 0, timeMs + 10000, { speed: 14 }));
+
+    expect(result.decision).toBe(TRAJECTORY_DECISION.UNCERTAIN);
+    expect(result.reason).toBe(OUTLIER_REASON.MODE_TRANSITION_PENDING);
+    expect(newState.mode).toBe(MOVEMENT_MODE.WALKING); // not switched yet
+    expect(newState.transitionBuffer).toHaveLength(1);
+    expect(newState.transitionBuffer[0].candidateMode).toBe(MOVEMENT_MODE.VEHICLE);
+  });
+
+  test('a true teleport (implausible even for VEHICLE) is still rejected outright', () => {
+    const boot = classifyFix(createInitialTrajectoryState(), fixAt(0, 0, 0));
+    const { state, distanceM, timeMs } = warmUp(boot.newState, 0, 0, 3, 1.2, 10);
+
+    // 1700m in 5s from the anchor = 340 m/s: exceeds even VEHICLE's outlier ceiling.
+    const { newState, result } = classifyFix(state, fixAt(distanceM + 1700, 0, timeMs + 5000, { speed: 340 }));
+
+    expect(result.decision).toBe(TRAJECTORY_DECISION.OUTLIER);
+    expect(newState.transitionBuffer).toHaveLength(0);
   });
 });

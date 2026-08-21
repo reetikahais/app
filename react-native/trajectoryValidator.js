@@ -239,6 +239,7 @@ export function createInitialTrajectoryState() {
     candidateMode: null,
     pendingUncertain: null,
     outlierStreak: 0,
+    transitionBuffer: [],
   };
 }
 
@@ -343,6 +344,41 @@ function resolvePending(trajState, fix) {
   };
 }
 
+// Step22: a fix rejected against the CURRENT mode's ceiling may still be genuine evidence of a
+// real transport-mode change (walking -> vehicle) rather than noise. Picks the candidate mode via
+// candidateModeForAvgSpeed (the SAME inference-band scale resolveTransitionBuffer's band-match
+// check below uses) rather than ceilingForMode's own generous plausibility scale - the two scales
+// disagree (e.g. 14 m/s passes CYCLING's loose ceiling but reads as VEHICLE-band on the inference
+// scale), so picking by ceiling here would open a buffer under a candidateMode that a later
+// same-mode segment could never actually band-match against. Returns null if the fix's own pace
+// isn't even a faster mode than the current one, or if it's implausible even against that
+// candidate's ceiling (a true teleport) - the caller's existing OUTLIER/UNCERTAIN result then
+// stands unchanged.
+function openTransitionBuffer(trajState, fix) {
+  const metrics = computeTrajectoryMetrics(trajState.lastAcceptedFix, fix);
+  const candidateMode = candidateModeForAvgSpeed(metrics.impliedSpeedMps);
+  if (!nextFasterModes(trajState.mode).includes(candidateMode)) return null;
+
+  const vsCandidate = classifyAgainstReference({
+    refFix: trajState.lastAcceptedFix,
+    prevFix: trajState.prevAcceptedFix,
+    fix,
+    mode: candidateMode,
+  });
+  if (vsCandidate.decision !== TRAJECTORY_DECISION.ACCEPTED) return null;
+
+  return {
+    newState: { ...trajState, transitionBuffer: [{ fix, candidateMode }] },
+    result: {
+      decision: TRAJECTORY_DECISION.UNCERTAIN,
+      reason: OUTLIER_REASON.MODE_TRANSITION_PENDING,
+      distanceFromLastAcceptedM: vsCandidate.distanceM,
+      impliedSpeedMps: vsCandidate.impliedSpeedMps,
+      movementMode: trajState.mode,
+    },
+  };
+}
+
 // Step1-21 entry point. Returns { newState, result } - result carries the Step14/20 diagnostics
 // fields (decision, reason, distanceFromLastAcceptedM, impliedSpeedMps, movementMode). Caller
 // must only feed the fix into the movement state machine / smoothing / processed trail when
@@ -393,7 +429,13 @@ export function classifyFix(trajState, rawFix) {
   if (outcome.decision === TRAJECTORY_DECISION.ACCEPTED) {
     return acceptFix(trajState, fix, null, outcome.distanceM, outcome.impliedSpeedMps);
   }
+
   if (outcome.decision === TRAJECTORY_DECISION.OUTLIER) {
+    // Only an outright rejection is eligible to become transition evidence - a softer UNCERTAIN
+    // (LOW_CONFIDENCE) outcome already has its own resolution path below (pendingUncertain /
+    // resolvePending's UNCERTAIN_CONFIRMED chain) and must not be pre-empted by it.
+    const transitionCandidate = openTransitionBuffer(trajState, fix);
+    if (transitionCandidate) return transitionCandidate;
     return outlierFix(trajState, fix, outcome.reason, outcome.distanceM, outcome.impliedSpeedMps);
   }
   return {
