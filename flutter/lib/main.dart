@@ -12,6 +12,7 @@ import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'db.dart';
+import 'animated_map_export.dart';
 import 'location_task.dart';
 import 'logger.dart';
 
@@ -167,6 +168,22 @@ class _LoggerHomeState extends State<LoggerHome> with WidgetsBindingObserver {
     }
   }
 
+  Future<void> _exportAnimatedMap() async {
+    try {
+      final db = await openLogDb();
+      final rows = await getAllLogs(db);
+      final dir = await getApplicationDocumentsDirectory();
+      final exportFile = File(p.join(dir.path, 'raahmitra_animated_route.html'));
+      await exportFile.writeAsString(buildAnimatedMapHtml(rows));
+      await SharePlus.instance.share(ShareParams(files: [XFile(exportFile.path)]));
+    } catch (err) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Animated map export failed: $err')),
+      );
+    }
+  }
+
   Future<void> _confirmClearLogs() async {
     final confirmed = await showDialog<bool>(
       context: context,
@@ -224,6 +241,11 @@ class _LoggerHomeState extends State<LoggerHome> with WidgetsBindingObserver {
             ElevatedButton(
               onPressed: _exportLogs,
               child: const Text('Export Logs'),
+            ),
+            const SizedBox(height: 12),
+            ElevatedButton(
+              onPressed: _exportAnimatedMap,
+              child: const Text('Export Animated Map'),
             ),
             const SizedBox(height: 12),
             ElevatedButton(

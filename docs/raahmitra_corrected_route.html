@@ -1,0 +1,639 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>RaahMitra Corrected Route Replay</title>
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+    crossorigin=""
+  />
+  <style>
+    :root {
+      --bg: #0d1413;
+      --panel: #132018;
+      --panel-2: #172820;
+      --line: #2a3a34;
+      --text: #ebf3ee;
+      --muted: #8ba49b;
+      --jc: #4285F4;
+      --pooja: #EA4335;
+      --good: #4caf6d;
+      --warn: #e0c04a;
+      --orange: #e08a3d;
+      --red: #d1554a;
+      --yellow: #f4d03f;
+    }
+
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      height: 100%;
+      font-family: Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+
+    body {
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 12px 18px;
+      border-bottom: 1px solid var(--line);
+      background: linear-gradient(180deg, var(--panel-2), var(--panel));
+      flex-shrink: 0;
+    }
+
+    .title {
+      font-size: 18px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+    }
+
+    .subtitle {
+      color: var(--muted);
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      margin-left: 8px;
+    }
+
+    .stats {
+      display: flex;
+      gap: 18px;
+      flex-wrap: wrap;
+    }
+
+    .stat {
+      text-align: right;
+    }
+
+    .stat-value {
+      font-weight: 700;
+      font-size: 15px;
+      color: var(--text);
+    }
+
+    .stat-label {
+      color: var(--muted);
+      font-size: 10px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .layout {
+      display: flex;
+      flex: 1;
+      min-height: 0;
+    }
+
+    .map-wrap {
+      position: relative;
+      flex: 1;
+      min-width: 0;
+    }
+
+    #map {
+      width: 100%;
+      height: 100%;
+      background: #08110f;
+    }
+
+    .side {
+      width: 360px;
+      flex-shrink: 0;
+      border-left: 1px solid var(--line);
+      background: var(--panel);
+      padding: 14px 16px;
+      overflow: auto;
+    }
+
+    h3 {
+      margin: 0 0 12px;
+      font-size: 12px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    .device-card {
+      border: 1px solid var(--line);
+      border-left-width: 4px;
+      border-radius: 10px;
+      background: var(--panel-2);
+      padding: 12px;
+      margin-bottom: 14px;
+    }
+
+    .device-card.jc { border-left-color: var(--jc); }
+    .device-card.pooja { border-left-color: var(--pooja); }
+
+    .device-name {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 8px;
+      font-weight: 700;
+    }
+
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      display: inline-block;
+    }
+
+    .rows {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px 12px;
+    }
+
+    .cell {
+      font-size: 11px;
+      color: var(--text);
+    }
+
+    .k {
+      color: var(--muted);
+      font-size: 9px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-bottom: 3px;
+    }
+
+    .val {
+      font-size: 12px;
+      word-break: break-word;
+    }
+
+    .badge {
+      display: inline-block;
+      border-radius: 999px;
+      padding: 3px 8px;
+      font-size: 10px;
+      border: 1px solid transparent;
+    }
+
+    .badge.stationary {
+      background: rgba(76,175,109,0.12);
+      color: #8fe3a0;
+      border-color: rgba(76,175,109,0.35);
+    }
+
+    .badge.moving {
+      background: rgba(224,138,61,0.15);
+      color: #ffb26b;
+      border-color: rgba(224,138,61,0.35);
+    }
+
+    .badge.confirming_movement,
+    .badge.confirming_stop {
+      background: rgba(224,192,74,0.15);
+      color: #f7d86b;
+      border-color: rgba(224,192,74,0.35);
+    }
+
+    .note {
+      font-size: 12px;
+      color: var(--muted);
+      line-height: 1.6;
+      background: rgba(255,255,255,0.02);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 10px 12px;
+    }
+
+    .legend {
+      position: absolute;
+      left: 12px;
+      bottom: 12px;
+      z-index: 500;
+      background: rgba(10, 18, 16, 0.9);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 10px 12px;
+      font-size: 11px;
+      color: var(--muted);
+      width: 240px;
+    }
+
+    .legend .head {
+      color: var(--text);
+      font-weight: 700;
+      font-size: 10px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      margin-bottom: 7px;
+    }
+
+    .legend-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 5px 0;
+    }
+
+    .sw {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      display: inline-block;
+    }
+
+    .leaflet-popup-content-wrapper,
+    .leaflet-popup-tip {
+      background: #16231d;
+      color: var(--text);
+    }
+
+    #exportBtn {
+      transition: all 0.2s ease;
+    }
+
+    #exportBtn:hover {
+      background: var(--panel);
+      border-color: var(--muted);
+      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
+    }
+
+    #exportBtn:active {
+      transform: scale(0.98);
+    }
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <div>
+      <span class="title">RaahMitra</span>
+      <span class="subtitle">Corrected Route Debug</span>
+    </div>
+    <div class="stats" id="stats"></div>
+    <div style="display: flex; gap: 8px; margin-left: auto;">
+      <label for="jsonInput" style="padding: 8px 14px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel-2); color: var(--text); cursor: pointer; font-size: 12px; font-weight: 600; letter-spacing: 0.05em;">
+        Open JSON
+      </label>
+      <input id="jsonInput" type="file" accept=".json,.jsone,application/json" style="display: none;" />
+      <button id="exportBtn" style="padding: 8px 14px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel-2); color: var(--text); cursor: pointer; font-size: 12px; font-weight: 600; transition: all 0.2s; letter-spacing: 0.05em;">
+        Export HTML
+      </button>
+    </div>
+  </div>
+
+  <div class="layout">
+    <div class="map-wrap">
+      <div id="map"></div>
+
+      <div class="legend">
+        <div class="head">Legend</div>
+        <div class="legend-row"><span class="sw" style="background: var(--jc);"></span> RaahMitra raw/filtered route</div>
+        <div class="legend-row"><span class="sw" style="background: #7c8d85;"></span> Dropped low-quality fix</div>
+      </div>
+    </div>
+
+    <aside class="side">
+      <h3>Device summary</h3>
+      <div id="deviceCards"></div>
+
+      <h3 style="margin-top: 18px;">Interpretation</h3>
+      <div class="note">
+        The blue route is generated from this export's filtered processed points. Four stale fixes are shown as dropped low-quality fixes; the export does not contain a road-matched route overlay.
+      </div>
+    </aside>
+  </div>
+
+  <script
+    src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+    integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+    crossorigin=""
+  ></script>
+
+  <script>
+    const JC_EXPORT = {
+      exported_at: "2026-08-18T13:10:04.280Z",
+      logs: [
+        { id: 43, timestamp: "2026-08-18T12:43:04.634Z", latitude: 31.0954486, longitude: 77.1541123, accuracy: 14.873000144958496, battery: 100, app_state: "foreground", method: "fused", signal_dbm: -118, signal_level: 2, carrier: "Jio", network_type: "LTE", movement_state: "STATIONARY", processed_latitude: 31.095395606149715, processed_longitude: 77.1541446002353, distance_from_anchor_m: 6.646970353622321, location_quality: 85, processing_version: 2 },
+        { id: 44, timestamp: "2026-08-18T12:43:34.670Z", latitude: 31.0953481, longitude: 77.1533696, accuracy: 200, battery: 100, app_state: "foreground", method: "low_accuracy_fallback", signal_dbm: -114, signal_level: 2, carrier: "Jio", network_type: "LTE", movement_state: "STATIONARY", processed_latitude: 31.095395529746916, processed_longitude: 77.15414335382431, distance_from_anchor_m: 73.86319327641095, location_quality: 0, processing_version: 2 },
+        { id: 45, timestamp: "2026-08-18T12:44:08.533Z", latitude: 31.0953496, longitude: 77.154177, accuracy: 14.564000129699707, battery: 100, app_state: "foreground", method: "fused", signal_dbm: -90, signal_level: 4, carrier: "Jio", network_type: "LTE", movement_state: "STATIONARY", processed_latitude: 31.09538484138701, processed_longitude: 77.15415118366137, distance_from_anchor_m: 4.625848153451046, location_quality: 85, processing_version: 2 },
+        { id: 46, timestamp: "2026-08-18T12:44:40.860Z", latitude: 31.0953773, longitude: 77.154227, accuracy: 12.717000007629395, battery: 100, app_state: "foreground", method: "fused", signal_dbm: -78, signal_level: 4, carrier: "Jio", network_type: "LTE", movement_state: "STATIONARY", processed_latitude: 31.095383077878914, processed_longitude: 77.15416891285719, distance_from_anchor_m: 5.568084105874515, location_quality: 87, processing_version: 2 },
+        { id: 47, timestamp: "2026-08-18T12:49:02.656Z", latitude: 31.0959981, longitude: 77.153518, accuracy: 15.02299976348877, battery: 100, app_state: "foreground", method: "fused", signal_dbm: -68, signal_level: 4, carrier: "Jio", network_type: "LTE", movement_state: "CONFIRMING_MOVEMENT", processed_latitude: 31.095690588939455, processed_longitude: 77.1538434564286, distance_from_anchor_m: 92.29348227673273, location_quality: 75, processing_version: 2 },
+        { id: 48, timestamp: "2026-08-18T12:51:40.583Z", latitude: 31.0963309, longitude: 77.1528361, accuracy: 15.531000137329102, battery: 100, app_state: "foreground", method: "fused", signal_dbm: -89, signal_level: 4, carrier: "Jio", network_type: "LTE", movement_state: "MOVING", processed_latitude: 31.096202837787892, processed_longitude: 77.15303757128572, distance_from_anchor_m: 0, location_quality: 84, processing_version: 2 },
+        { id: 49, timestamp: "2026-08-18T12:53:40.494Z", latitude: 31.0962911, longitude: 77.1528248, accuracy: 13.642000198364258, battery: 100, app_state: "foreground", method: "fused", signal_dbm: -95, signal_level: 4, carrier: "Jio", network_type: "LTE", movement_state: "CONFIRMING_STOP", processed_latitude: 31.096246968893944, processed_longitude: 77.15293118564287, distance_from_anchor_m: 0, location_quality: 76, processing_version: 2 }
+      ]
+    };
+
+    const POOJA_EXPORT = {
+      exported_at: "2026-08-18T12:55:05.074Z",
+      logs: [
+        { id: 1, timestamp: "2026-08-18T12:42:22.786Z", latitude: 31.0954236, longitude: 77.1541038, accuracy: 19.77400016784668, battery: 34, app_state: "foreground", method: "fused", signal_dbm: null, signal_level: null, carrier: "Jio", network_type: null, movement_state: "STATIONARY", processed_latitude: 31.0954236, processed_longitude: 77.1541038, distance_from_anchor_m: 0, location_quality: 80, processing_version: 2 },
+        { id: 2, timestamp: "2026-08-18T12:42:56.998Z", latitude: 31.0954502, longitude: 77.1541087, accuracy: 13.89900016784668, battery: 34, app_state: "foreground", method: "fused", signal_dbm: -108, signal_level: 3, carrier: "Jio", network_type: "LTE", movement_state: "STATIONARY", processed_latitude: 31.095441403858764, processed_longitude: 77.15410707965819, distance_from_anchor_m: 0.9901799882626171, location_quality: 86, processing_version: 2 },
+        { id: 3, timestamp: "2026-08-18T12:44:50.914Z", latitude: 31.09518, longitude: 77.1532731, accuracy: 17.496000289916992, battery: 34, app_state: "foreground", method: "fused", signal_dbm: -108, signal_level: 3, carrier: "Jio", network_type: "LTE", movement_state: "CONFIRMING_MOVEMENT", processed_latitude: 31.09531070192938, processed_longitude: 77.1536900898291, distance_from_anchor_m: 84.56185665061928, location_quality: 73, processing_version: 2 },
+        { id: 4, timestamp: "2026-08-18T12:46:51.186Z", latitude: 31.0935143, longitude: 77.1527314, accuracy: 84.8759994506836, battery: 34, app_state: "foreground", method: "low_accuracy_fallback", signal_dbm: -108, signal_level: 3, carrier: "Jio", network_type: "5G", movement_state: "CONFIRMING_MOVEMENT", processed_latitude: 31.09441250096469, processed_longitude: 77.15321074491455, distance_from_anchor_m: 251.14931679988248, location_quality: 5, processing_version: 2 },
+        { id: 5, timestamp: "2026-08-18T12:48:04.340Z", latitude: 31.0935692, longitude: 77.153196, accuracy: 10.833000183105469, battery: 34, app_state: "foreground", method: "fused", signal_dbm: -108, signal_level: 3, carrier: "Jio", network_type: "5G", movement_state: "MOVING", processed_latitude: 31.093737860192938, processed_longitude: 77.1531989489829, distance_from_anchor_m: 0, location_quality: 89, processing_version: 2 },
+        { id: 6, timestamp: "2026-08-18T12:49:00.404Z", latitude: 31.0931574, longitude: 77.1530354, accuracy: 17.420000076293945, battery: 34, app_state: "foreground", method: "fused", signal_dbm: -108, signal_level: 3, carrier: "Jio", network_type: "5G", movement_state: "MOVING", processed_latitude: 31.093273492038588, processed_longitude: 77.15306810979658, distance_from_anchor_m: 0, location_quality: 83, processing_version: 2 },
+        { id: 7, timestamp: "2026-08-18T12:50:02.398Z", latitude: 31.0931022, longitude: 77.153027, accuracy: 20.12299919128418, battery: 34, app_state: "foreground", method: "fused", signal_dbm: -108, signal_level: 3, carrier: "Jio", network_type: "5G", movement_state: "CONFIRMING_STOP", processed_latitude: 31.093187846019294, processed_longitude: 77.15304755489828, distance_from_anchor_m: 0, location_quality: 70, processing_version: 2 },
+        { id: 8, timestamp: "2026-08-18T12:51:05.403Z", latitude: 31.0931325, longitude: 77.1530305, accuracy: 15.994000434875488, battery: 34, app_state: "foreground", method: "fused", signal_dbm: -108, signal_level: 3, carrier: "Jio", network_type: "5G", movement_state: "STATIONARY", processed_latitude: 31.093120769293517, processed_longitude: 77.1530291449679, distance_from_anchor_m: 1.3107608451497657, location_quality: 84, processing_version: 2 },
+        { id: 9, timestamp: "2026-08-18T12:52:06.293Z", latitude: 31.0931325, longitude: 77.1530305, accuracy: 100, battery: 34, app_state: "foreground", method: "low_accuracy_fallback", signal_dbm: -108, signal_level: 3, carrier: "Jio", network_type: "5G", movement_state: "STATIONARY", processed_latitude: 31.093120950358905, processed_longitude: 77.15302916588304, distance_from_anchor_m: 1.2905290354573629, location_quality: 0, processing_version: 2 },
+        { id: 10, timestamp: "2026-08-18T12:53:07.287Z", latitude: 31.0931325, longitude: 77.1530305, accuracy: 100, battery: 33, app_state: "foreground", method: "low_accuracy_fallback", signal_dbm: -108, signal_level: 3, carrier: "Jio", network_type: "5G", movement_state: "STATIONARY", processed_latitude: 31.093121125919712, processed_longitude: 77.15302918616234, distance_from_anchor_m: 1.2709122943833238, location_quality: 0, processing_version: 2 },
+        { id: 11, timestamp: "2026-08-18T12:54:08.295Z", latitude: 31.0931325, longitude: 77.1530305, accuracy: 100, battery: 33, app_state: "foreground", method: "low_accuracy_fallback", signal_dbm: -108, signal_level: 3, carrier: "Jio", network_type: "5G", movement_state: "STATIONARY", processed_latitude: 31.09312129622319, processed_longitude: 77.15302920583436, distance_from_anchor_m: 1.2518829943928182, location_quality: 0, processing_version: 2 }
+      ]
+    };
+
+    const CURRENT_EXPORT = {
+      exported_at: "2026-08-19T07:38:24.421Z",
+      algorithm_version: "2.0.0",
+      logs: [
+        { id: 1, timestamp: "2026-08-19T07:33:57.022Z", latitude: 31.0953934, longitude: 77.1541224, accuracy: 14.292, battery: 32, app_state: "foreground", method: "fused", signal_dbm: -105, signal_level: 3, carrier: "Jio", network_type: "LTE", movement_state: "UNKNOWN", processed_latitude: 31.0953934, processed_longitude: 77.1541224, location_quality: 0, processing_status: "STALE_FALLBACK", fix_age_ms: 167216 },
+        { id: 2, timestamp: "2026-08-19T07:33:57.300Z", latitude: 31.0954294, longitude: 77.1541231, accuracy: 12.588, battery: 32, app_state: "foreground", method: "fused", signal_dbm: -105, signal_level: 3, carrier: "Jio", network_type: "LTE", movement_state: "UNKNOWN", processed_latitude: 31.0954294, processed_longitude: 77.1541231, location_quality: 0, processing_status: "STALE_FALLBACK", fix_age_ms: 44696 },
+        { id: 3, timestamp: "2026-08-19T07:33:59.830Z", latitude: 31.0954094, longitude: 77.1541232, accuracy: 13.29, battery: 32, app_state: "foreground", method: "fused", signal_dbm: -105, signal_level: 3, carrier: "Jio", network_type: "LTE", movement_state: "POSSIBLY_STOPPED", processed_latitude: 31.0954094, processed_longitude: 77.1541232, location_quality: 85, processing_status: "FRESH_ACCEPTED", fix_age_ms: 121 },
+        { id: 4, timestamp: "2026-08-19T07:34:09.016Z", latitude: 31.0954055, longitude: 77.1541281, accuracy: 8.946, battery: 32, app_state: "foreground", method: "fused", signal_dbm: -105, signal_level: 3, carrier: "Jio", network_type: "LTE", movement_state: "POSSIBLY_STOPPED", processed_latitude: 31.0954055, processed_longitude: 77.1541281, location_quality: 85, processing_status: "FRESH_ACCEPTED", fix_age_ms: 154 },
+        { id: 5, timestamp: "2026-08-19T07:34:14.465Z", latitude: 31.0954049, longitude: 77.1541288, accuracy: 9.227, battery: 32, app_state: "foreground", method: "fused", signal_dbm: -105, signal_level: 3, carrier: "Jio", network_type: "LTE", movement_state: "POSSIBLY_STOPPED", processed_latitude: 31.0954049, processed_longitude: 77.1541288, location_quality: 85, processing_status: "FRESH_ACCEPTED", fix_age_ms: 76 },
+        { id: 6, timestamp: "2026-08-19T07:34:28.119Z", latitude: 31.0953657, longitude: 77.1541461, accuracy: 9.436, battery: 31, app_state: "foreground", method: "fused", signal_dbm: -92, signal_level: 4, carrier: "Jio", network_type: "LTE", movement_state: "POSSIBLY_STOPPED", processed_latitude: 31.0953657, processed_longitude: 77.1541461, location_quality: 85, processing_status: "FRESH_ACCEPTED", fix_age_ms: 75 },
+        { id: 7, timestamp: "2026-08-19T07:35:09.146Z", latitude: 31.0953499, longitude: 77.1541749, accuracy: 5.663, battery: 31, app_state: "foreground", method: "fused", signal_dbm: -94, signal_level: 4, carrier: "Jio", network_type: "LTE", movement_state: "UNKNOWN", processed_latitude: 31.0953499, processed_longitude: 77.1541749, location_quality: 0, processing_status: "STALE_FALLBACK", fix_age_ms: 14657 },
+        { id: 8, timestamp: "2026-08-19T07:35:11.107Z", latitude: 31.0951712, longitude: 77.1540213, accuracy: 10, battery: 31, app_state: "foreground", method: "fused", signal_dbm: -94, signal_level: 4, carrier: "Jio", network_type: "LTE", movement_state: "POSSIBLY_STOPPED", processed_latitude: 31.0951712, processed_longitude: 77.1540213, location_quality: 85, processing_status: "FRESH_ACCEPTED", fix_age_ms: 81 },
+        { id: 9, timestamp: "2026-08-19T07:35:16.060Z", latitude: 31.0953257, longitude: 77.1540918, accuracy: 20.535, battery: 31, app_state: "foreground", method: "fused", signal_dbm: -94, signal_level: 4, carrier: "Jio", network_type: "LTE", movement_state: "POSSIBLY_STOPPED", processed_latitude: 31.0953257, processed_longitude: 77.1540918, location_quality: 60, processing_status: "FRESH_ACCEPTED", fix_age_ms: 47 },
+        { id: 10, timestamp: "2026-08-19T07:35:24.008Z", latitude: 31.0953731, longitude: 77.1540778, accuracy: 14.298, battery: 31, app_state: "foreground", method: "fused", signal_dbm: -108, signal_level: 3, carrier: "Jio", network_type: "LTE", movement_state: "UNKNOWN", processed_latitude: 31.0953731, processed_longitude: 77.1540778, location_quality: 85, processing_status: "FRESH_ACCEPTED", fix_age_ms: 62 },
+        { id: 11, timestamp: "2026-08-19T07:35:31.609Z", latitude: 31.0954121, longitude: 77.1540475, accuracy: 15.444, battery: 31, app_state: "foreground", method: "fused", signal_dbm: -113, signal_level: 2, carrier: "Jio", network_type: "LTE", movement_state: "UNKNOWN", processed_latitude: 31.0954121, processed_longitude: 77.1540475, location_quality: 85, processing_status: "FRESH_ACCEPTED", fix_age_ms: 102 },
+        { id: 12, timestamp: "2026-08-19T07:35:48.063Z", latitude: 31.0953915, longitude: 77.1540236, accuracy: 11.647, battery: 31, app_state: "background", method: "fused", signal_dbm: -117, signal_level: 2, carrier: "Jio", network_type: "LTE", movement_state: "POSSIBLY_STOPPED", processed_latitude: 31.0953915, processed_longitude: 77.1540236, location_quality: 85, processing_status: "FRESH_ACCEPTED", fix_age_ms: 7399 },
+        { id: 13, timestamp: "2026-08-19T07:35:53.175Z", latitude: 31.0954371, longitude: 77.1540881, accuracy: 13.286, battery: 31, app_state: "background", method: "fused", signal_dbm: -117, signal_level: 2, carrier: "Jio", network_type: "LTE", movement_state: "POSSIBLY_STOPPED", processed_latitude: 31.0954371, processed_longitude: 77.1540881, location_quality: 85, processing_status: "FRESH_ACCEPTED", fix_age_ms: 3582 },
+        { id: 14, timestamp: "2026-08-19T07:35:58.842Z", latitude: 31.0954455, longitude: 77.154095, accuracy: 24.546, battery: 31, app_state: "background", method: "fused", signal_dbm: -117, signal_level: 2, carrier: "Jio", network_type: "LTE", movement_state: "POSSIBLY_STOPPED", processed_latitude: 31.0954455, processed_longitude: 77.154095, location_quality: 60, processing_status: "FRESH_ACCEPTED", fix_age_ms: 281 },
+        { id: 15, timestamp: "2026-08-19T07:36:07.643Z", latitude: 31.0954512, longitude: 77.1541035, accuracy: 14.506, battery: 31, app_state: "background", method: "fused", signal_dbm: -117, signal_level: 2, carrier: "Jio", network_type: "LTE", movement_state: "POSSIBLY_STOPPED", processed_latitude: 31.0954512, processed_longitude: 77.1541035, location_quality: 85, processing_status: "FRESH_ACCEPTED", fix_age_ms: 179 },
+        { id: 16, timestamp: "2026-08-19T07:36:52.754Z", latitude: 31.0954154, longitude: 77.1540519, accuracy: 14.716, battery: 31, app_state: "foreground", method: "fused", signal_dbm: -105, signal_level: 3, carrier: "Jio", network_type: "LTE", movement_state: "UNKNOWN", processed_latitude: 31.0954154, processed_longitude: 77.1540519, location_quality: 0, processing_status: "STALE_FALLBACK", fix_age_ms: 11141 }
+      ]
+    };
+
+    const correctRoute = { jc: [], pooja: [] };
+
+    function simplifyRoute(points, maxStepMeters = 18) {
+      if (!points || points.length < 2) return points;
+      const out = [points[0]];
+      for (let i = 1; i < points.length - 1; i++) {
+        const prev = out[out.length - 1];
+        const curr = points[i];
+        const dist = haversineM(prev[0], prev[1], curr[0], curr[1]);
+        if (dist >= maxStepMeters) {
+          out.push(curr);
+        }
+      }
+      const last = points[points.length - 1];
+      if (out[out.length - 1] && (out[out.length - 1][0] !== last[0] || out[out.length - 1][1] !== last[1])) {
+        out.push(last);
+      }
+      return out;
+    }
+
+    const map = L.map('map').setView([31.0948, 77.1534], 16);
+    L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+      attribution: 'Imagery © Esri',
+      maxZoom: 20
+    }).addTo(map);
+
+    const base = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}', {
+      attribution: 'Map labels © Esri',
+      maxZoom: 20,
+      opacity: 0.75
+    }).addTo(map);
+
+    function haversineM(lat1, lng1, lat2, lng2) {
+      const R = 6371000;
+      const toRad = (x) => x * Math.PI / 180;
+      const dLat = toRad(lat2 - lat1);
+      const dLng = toRad(lng2 - lng1);
+      const a = Math.sin(dLat/2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng/2) ** 2;
+      return 2 * R * Math.asin(Math.sqrt(a));
+    }
+
+    function filterGood(logs) {
+      const kept = [];
+      const dropped = [];
+      let last = null;
+      for (const p of logs) {
+        if (p.method === 'low_accuracy_fallback' || p.location_quality === 0) {
+          dropped.push(p);
+          continue;
+        }
+        if (!last) {
+          kept.push(p);
+          last = p;
+          continue;
+        }
+        const d = haversineM(
+          last.processed_latitude,
+          last.processed_longitude,
+          p.processed_latitude,
+          p.processed_longitude
+        );
+        const stateChanged = p.movement_state !== last.movement_state;
+        const heartbeatDue = (new Date(p.timestamp).getTime() - new Date(last.timestamp).getTime()) >= 10 * 60 * 1000;
+        if (stateChanged || d >= 15 || heartbeatDue) {
+          kept.push(p);
+          last = p;
+        } else {
+          dropped.push(p);
+        }
+      }
+      return { kept, dropped };
+    }
+
+    const devices = [
+      { id: 'jc', label: 'RaahMitra session', color: '#4285F4', logs: CURRENT_EXPORT.logs }
+    ];
+
+    devices.forEach((device) => {
+      const filtered = filterGood(device.logs);
+      const kept = filtered.kept.map((p) => [p.processed_latitude, p.processed_longitude]);
+      const raw = device.logs.map((p) => [p.latitude, p.longitude]);
+
+      const rawLayer = L.polyline(raw, { color: device.color, weight: 2, opacity: 0.35, dashArray: '8 8' }).addTo(map);
+      const keptLayer = L.polyline(kept, { color: device.color, weight: 4, opacity: 0.9 }).addTo(map);
+
+      const corridor = simplifyRoute(correctRoute[device.id], 16);
+      const correctLayer = L.polyline(corridor, {
+        color: '#f6d431',
+        weight: 7,
+        opacity: 1,
+        dashArray: '14 9',
+        lineCap: 'round',
+        lineJoin: 'round'
+      }).addTo(map);
+
+      L.polyline(corridor, {
+        color: '#f6d431',
+        weight: 12,
+        opacity: 0.22,
+        lineCap: 'round',
+        lineJoin: 'round'
+      }).addTo(map);
+
+      const droppedMarkers = filtered.dropped.map((p) => {
+        return L.circleMarker([p.processed_latitude, p.processed_longitude], {
+          radius: 4,
+          color: '#7c8d85',
+          fillColor: '#7c8d85',
+          fillOpacity: 0.7,
+          weight: 1
+        }).addTo(map);
+      });
+
+      const first = kept[0];
+      if (first) {
+        L.marker(first).addTo(map).bindPopup(`${device.label}<br>first kept fix`);
+      }
+
+      const last = kept[kept.length - 1];
+      if (last) {
+        L.marker(last, { icon: L.divIcon({ html: '<div style="background:' + device.color + '; border:3px solid #0d1413; width:16px; height:16px; border-radius:50%;"></div>', className: '', iconSize: [16, 16] }) }).addTo(map).bindPopup(`${device.label}<br>latest kept fix`);
+      }
+
+      device.filterSummary = {
+        raw: device.logs.length,
+        kept: filtered.kept.length,
+        dropped: filtered.dropped.length,
+        rawLayer,
+        keptLayer,
+        correctLayer,
+        droppedMarkers
+      };
+    });
+
+    const allPoints = devices.flatMap((d) => d.filterSummary.keptLayer.getLatLngs());
+    if (allPoints.length) {
+      map.fitBounds(L.latLngBounds(allPoints), { padding: [40, 40] });
+    }
+
+    document.getElementById('stats').innerHTML = `
+      <div class="stat">
+        <div class="stat-value">${devices.reduce((s, d) => s + d.logs.length, 0)}</div>
+        <div class="stat-label">Raw fixes</div>
+      </div>
+      <div class="stat">
+        <div class="stat-value">${devices.reduce((s, d) => s + d.filterSummary.kept, 0)}</div>
+        <div class="stat-label">Kept</div>
+      </div>
+      <div class="stat">
+        <div class="stat-value">${devices.reduce((s, d) => s + d.filterSummary.dropped, 0)}</div>
+        <div class="stat-label">Dropped</div>
+      </div>
+    `;
+
+    const cards = document.getElementById('deviceCards');
+    cards.innerHTML = devices.map((d) => {
+      const state = d.logs[d.logs.length - 1]?.movement_state || 'UNKNOWN';
+      return `
+        <div class="device-card ${d.id}">
+          <div class="device-name"><span class="dot" style="background: ${d.color};"></span>${d.label}</div>
+          <div class="rows">
+            <div class="cell">
+              <div class="k">State</div>
+              <div class="val"><span class="badge ${state.toLowerCase().replace(/_/g, '_')}">${state.replace(/_/g, ' ')}</span></div>
+            </div>
+            <div class="cell">
+              <div class="k">Raw</div>
+              <div class="val">${d.logs.length}</div>
+            </div>
+            <div class="cell">
+              <div class="k">Kept</div>
+              <div class="val">${d.filterSummary.kept}</div>
+            </div>
+            <div class="cell">
+              <div class="k">Dropped</div>
+              <div class="val">${d.filterSummary.dropped}</div>
+            </div>
+          </div>
+        </div>
+      `;
+    }).join('');
+
+    // Export functionality
+    document.getElementById('exportBtn').addEventListener('click', function() {
+      const html = document.documentElement.outerHTML;
+      const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
+      const link = document.createElement('a');
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
+      link.href = URL.createObjectURL(blob);
+      link.download = `raahmitra-route-${timestamp}.html`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(link.href);
+    });
+
+    const importColor = '#ff9f43';
+    let importedLayers = [];
+
+    function normalizeImport(data) {
+      if (Array.isArray(data.logs)) return data.logs;
+      if (!Array.isArray(data.raw_locations)) {
+        throw new Error('Expected logs or raw_locations in the JSON export.');
+      }
+      const processed = Array.isArray(data.processed_locations) ? data.processed_locations : [];
+      return data.raw_locations.map((raw, index) => {
+        const result = processed[index] || {};
+        const confidence = result.position_confidence;
+        return {
+          id: raw.id,
+          timestamp: raw.created_at,
+          latitude: raw.latitude,
+          longitude: raw.longitude,
+          accuracy: raw.horizontal_accuracy_m,
+          battery: raw.battery_pct,
+          app_state: raw.app_state,
+          method: raw.method,
+          signal_dbm: raw.signal_dbm,
+          signal_level: raw.signal_level,
+          carrier: raw.carrier,
+          network_type: raw.network_type,
+          movement_state: result.movement_state || 'UNKNOWN',
+          processed_latitude: result.filtered_latitude ?? raw.latitude,
+          processed_longitude: result.filtered_longitude ?? raw.longitude,
+          location_quality: confidence === 'LOW' ? 0 : confidence === 'MEDIUM' ? 60 : 85
+        };
+      });
+    }
+
+    function plotImportedExport(data, fileName) {
+      const logs = normalizeImport(data);
+      if (!logs.length) throw new Error('The JSON export contains no locations.');
+      const filtered = filterGood(logs);
+      const raw = logs.map((point) => [point.latitude, point.longitude]);
+      const kept = filtered.kept.map((point) => [point.processed_latitude, point.processed_longitude]);
+
+      importedLayers.forEach((layer) => map.removeLayer(layer));
+      importedLayers = [
+        L.polyline(raw, { color: importColor, weight: 2, opacity: 0.45, dashArray: '8 8' }).addTo(map),
+        L.polyline(kept, { color: importColor, weight: 5, opacity: 0.95 }).addTo(map)
+      ];
+      filtered.dropped.forEach((point) => {
+        importedLayers.push(L.circleMarker([point.processed_latitude, point.processed_longitude], {
+          radius: 5, color: '#7c8d85', fillColor: '#7c8d85', fillOpacity: 0.9, weight: 1
+        }).addTo(map));
+      });
+      map.fitBounds(L.latLngBounds(raw), { padding: [40, 40] });
+      document.querySelector('.subtitle').textContent = `${fileName} | ${logs.length} fixes | ${filtered.kept.length} kept`;
+    }
+
+    document.getElementById('jsonInput').addEventListener('change', function(event) {
+      const file = event.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = function() {
+        try {
+          plotImportedExport(JSON.parse(reader.result), file.name);
+        } catch (error) {
+          window.alert(`Could not plot JSON: ${error.message}`);
+        }
+      };
+      reader.readAsText(file);
+    });
+  </script>
+</body>
+</html>

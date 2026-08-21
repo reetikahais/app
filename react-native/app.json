@@ -11,6 +11,7 @@
     },
     "android": {
       "package": "com.raahmitra.gpslogger",
+      "versionCode": 1,
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/android-icon-foreground.png",
@@ -48,9 +49,9 @@
     ],
     "extra": {
       "eas": {
-        "projectId": "04b1947e-8528-4e85-9193-804e9a7067ee"
+        "projectId": "9884f62f-3e2e-4f15-9ad2-29fdb476493e"
       }
     },
-    "owner": "rahamitra"
+    "owner": "jitenderchauhan"
   }
 }

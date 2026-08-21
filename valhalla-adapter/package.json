@@ -1,0 +1,14 @@
+{
+  "name": "raahmitra-valhalla-adapter",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Translates RaahMitra's MATCHER_ENDPOINT contract to a self-hosted Valhalla trace_attributes server.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test tests/*.test.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

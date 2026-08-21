@@ -1,7 +1,7 @@
 import { File, Paths } from 'expo-file-system';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Battery from 'expo-battery';
-import { APP_STATE_KEY, LOG_INTERVAL_MS } from './locationTask';
+import { APP_STATE_KEY, TRACKING_PROFILES } from './trackingConfig';
 
 const EVENTS_LOG_FILENAME = 'events.log';
 const HEARTBEAT_KEY = 'last_heartbeat';
@@ -102,7 +102,7 @@ export async function checkForMissedShutdown() {
     }
 
     const gapMs = Date.now() - Number(lastHeartbeatStr);
-    if (gapMs > KILL_GAP_MULTIPLIER * LOG_INTERVAL_MS) {
+    if (gapMs > KILL_GAP_MULTIPLIER * TRACKING_PROFILES.MOVING_NORMAL.timeIntervalMs) {
       await logEvent('app_kill_detected', { reason: 'gap_exceeds_threshold', gap_ms: gapMs });
     }
     await logEvent('app_start', { reason: 'normal' });

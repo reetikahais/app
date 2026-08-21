@@ -1,0 +1,18 @@
+# Runs only the Valhalla routing engine itself (verified against the official
+# ghcr.io/valhalla/valhalla-scripted image docs, valhalla/valhalla/docker/README.md).
+# The small adapter in this folder (server.js) is deliberately NOT containerized here — run it
+# directly with `node server.js` on the host; see README.md.
+services:
+  valhalla:
+    image: ghcr.io/valhalla/valhalla-scripted:latest
+    volumes:
+      - ./custom_files:/custom_files
+    environment:
+      # Swap this for a smaller custom-drawn extract (e.g. from https://extract.bbbike.org/) once
+      # you know your walking area — see README.md. Northern Zone covers Himachal Pradesh but is a
+      # 212MB download and will take longer to build into a routing graph.
+      - tile_urls=https://download.geofabrik.de/asia/india/northern-zone-latest.osm.pbf
+      - build_elevation=False
+    ports:
+      - "8002:8002"
+    restart: unless-stopped

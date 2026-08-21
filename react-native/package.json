@@ -4,24 +4,27 @@
   "main": "index.js",
   "dependencies": {
     "@react-native-async-storage/async-storage": "2.2.0",
-    "expo": "~57.0.12",
-    "expo-battery": "~57.0.1",
-    "expo-dev-client": "~57.0.11",
-    "expo-file-system": "~57.0.2",
+    "expo": "~57.0.14",
+    "expo-battery": "~57.0.2",
+    "expo-dev-client": "~57.0.13",
+    "expo-file-system": "~57.0.4",
     "expo-intent-launcher": "~57.0.1",
-    "expo-location": "~57.0.9",
-    "expo-sharing": "~57.0.11",
+    "expo-location": "~57.0.11",
+    "expo-sharing": "~57.0.13",
     "expo-sqlite": "~57.0.1",
     "expo-status-bar": "~57.0.1",
-    "expo-task-manager": "~57.0.9",
+    "expo-task-manager": "~57.0.11",
     "react": "19.2.3",
-    "react-native": "0.86.2"
+    "react-native": "0.86.2",
+    "react-native-safe-area-context": "~5.7.0",
+    "react-native-webview": "13.16.1"
   },
   "scripts": {
     "start": "expo start",
     "android": "expo run:android",
     "ios": "expo run:ios",
-    "web": "expo start --web"
+    "web": "expo start --web",
+    "test": "node --test tests/*.test.js"
   },
   "private": true
 }
