@@ -136,6 +136,13 @@ promoted to ACCEPTED. This satisfies the actual behavioral requirement (no false
 teleport slipping through) even though the two earlier evidence fixes remain excluded from the
 trail — same non-treatment `mapPoints.js` already gives any UNCERTAIN row today.
 
+**This is a known limitation, not a closed question**: the confirming fix's route segment jumps
+directly from the pre-transition anchor to wherever the 3rd buffered fix landed, silently
+skipping the distance the first two evidence fixes actually covered. For a fast mode transition
+(e.g. getting into a moving car) that gap could be a non-trivial chunk of real route/distance.
+Revisit this specifically for route/distance continuity once Step22 ships and real
+transition data exists to evaluate against — out of scope for this pass.
+
 ## Data flow
 
 ```
@@ -187,8 +194,10 @@ convention for this file — see `475aa13`).
 - Kalman/process-noise widening during transitions — main has no Kalman filter (fixed-alpha
   blend per movement state instead); the existing generic jump-handling in
   `movementStateMachine.js` already covers this need (see Design §5).
-- Porting JC branch's "progressive movement" (net-displacement/path-ratio) concept — not needed;
-  buffer confirmation already only requires multi-fix agreement for genuinely borderline cases,
-  never gates an unambiguous fast/accurate/consistent-bearing fix.
+- Porting JC branch's "progressive movement" (net-displacement/path-ratio) concept — not needed
+  for Step22; buffer confirmation already only requires multi-fix agreement for genuinely
+  borderline cases, never gates an unambiguous fast/accurate/consistent-bearing fix. Evaluate
+  separately, on its own merits, for the slow-walking/GPS-noise discrimination job it actually
+  targets — that's an unrelated concern from mode-transition evidence.
 - Any change to `movementStateMachine.js`, `locationTask.js`, or `mapPoints.js` — verified
   unnecessary (Design §5).
