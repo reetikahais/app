@@ -7,7 +7,7 @@ import 'movement_state_machine.dart';
 // processed trail. Mirrors react-native/trajectoryValidator.js 1:1, same convention as
 // movement_state_machine.dart mirroring movementStateMachine.js. No I/O, no platform APIs.
 //
-// Design doc: docs/superpowers/plans/changes.md (STEP1-21).
+// Design doc: docs/superpowers/plans/changes.md (STEP1-22).
 
 class TrajectoryDecision {
   static const String accepted = 'ACCEPTED';
@@ -567,6 +567,13 @@ TrajectoryOutcome _resolveTransitionBuffer(TrajectoryState trajState, Trajectory
       computeTrajectoryMetrics(i == 0 ? trajState.lastAcceptedFix! : seeded[i - 1].fix, seeded[i].fix).impliedSpeedMps,
   ];
 
+  // Known limitation (see docs/superpowers/specs/2026-08-21-mode-transition-validation-design.md
+  // Design §6): only the confirming fix itself is accepted here - the earlier buffered fixes stay
+  // UNCERTAIN/modeTransitionPending as already emitted, so the movement state machine, smoothing,
+  // and map trail all jump straight from the pre-transition anchor to this fix, skipping whatever
+  // ground the buffered fixes actually covered. Deliberately deferred, not an oversight - revisit
+  // once real transition data exists to evaluate whether promoting the buffered fixes retroactively
+  // is worth the added complexity.
   final confirmed = trajState.copyWith(
     mode: candidateMode,
     speedHistory: speedHistory,

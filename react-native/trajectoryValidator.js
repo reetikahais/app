@@ -3,7 +3,7 @@
 // processed trail. Mirrors flutter/lib/trajectory_validator.dart 1:1, same convention as
 // movementStateMachine.js / mapPoints.js. No I/O, no platform APIs.
 //
-// Design doc: docs/superpowers/plans/changes.md (STEP1-21).
+// Design doc: docs/superpowers/plans/changes.md (STEP1-22).
 
 import {
   haversineDistanceMeters,
@@ -442,6 +442,13 @@ function resolveTransitionBuffer(trajState, fix) {
     return computeTrajectoryMetrics(ref, entry.fix).impliedSpeedMps;
   });
 
+  // Known limitation (see docs/superpowers/specs/2026-08-21-mode-transition-validation-design.md
+  // Design §6): only the confirming fix itself is accepted here - the earlier buffered fixes stay
+  // UNCERTAIN/MODE_TRANSITION_PENDING as already emitted, so the movement state machine, smoothing,
+  // and map trail all jump straight from the pre-transition anchor to this fix, skipping whatever
+  // ground the buffered fixes actually covered. Deliberately deferred, not an oversight - revisit
+  // once real transition data exists to evaluate whether promoting the buffered fixes retroactively
+  // is worth the added complexity.
   const confirmed = {
     ...trajState,
     mode: candidateMode,
