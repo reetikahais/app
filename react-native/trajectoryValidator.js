@@ -30,6 +30,8 @@ export const OUTLIER_REASON = Object.freeze({
   STALE_ANCHOR_RECOVERING: 'STALE_ANCHOR_RECOVERING',
   STALE_ANCHOR_REANCHORED: 'STALE_ANCHOR_REANCHORED',
   UNCERTAIN_CONFIRMED: 'UNCERTAIN_CONFIRMED',
+  MODE_TRANSITION_PENDING: 'MODE_TRANSITION_PENDING',
+  MODE_TRANSITION_CONFIRMED: 'MODE_TRANSITION_CONFIRMED',
 });
 
 export const MOVEMENT_MODE = Object.freeze({
@@ -94,6 +96,23 @@ export const UNCERTAIN_CONFIRM_TIMEOUT_FIXES = 2;
 export const BORDERLINE_RATIO = 0.8;
 export const SPEED_DISAGREEMENT_RATIO = 0.6;
 export const SPEED_DISAGREEMENT_SLACK_MPS = 2;
+
+// Step22: mode-transition evidence - a fix implausible for the current mode isn't immediately
+// OUTLIER/UNCERTAIN if it's plausible for a faster mode; it's buffered instead (see
+// openTransitionBuffer/resolveTransitionBuffer below), and only a run of MODE_SWITCH_CONFIRM_COUNT
+// mutually-consistent faster-mode fixes actually switches the mode. Reuses
+// MODE_SWITCH_CONFIRM_COUNT (3) as the buffer's confirm size - this buffer IS this transition's
+// hysteresis, the same bar the normal (accepted-fixes-only) mode-switch path already uses.
+export const MODE_TRANSITION_BUFFER_MAX_AGE_MS = 60000;
+
+const MODE_ORDER = [MOVEMENT_MODE.WALKING, MOVEMENT_MODE.CYCLING, MOVEMENT_MODE.VEHICLE];
+
+// UNKNOWN has no "faster" mode - its ceiling already equals VEHICLE's (see
+// UNKNOWN_MAX_SPEED_MPS), so transition evidence never needs to run while mode is still UNKNOWN.
+export function nextFasterModes(mode) {
+  const idx = MODE_ORDER.indexOf(mode);
+  return idx === -1 ? [] : MODE_ORDER.slice(idx + 1);
+}
 
 function ceilingForMode(mode) {
   switch (mode) {

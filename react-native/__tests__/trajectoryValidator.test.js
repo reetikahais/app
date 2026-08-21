@@ -7,6 +7,7 @@ import {
   MOVEMENT_MODE,
   STALE_ANCHOR_THRESHOLD_MS,
   UNCERTAIN_CONFIRM_TIMEOUT_FIXES,
+  nextFasterModes,
 } from '../trajectoryValidator';
 
 const BASE = { lat: 31.4440206, lon: 77.0467109 };
@@ -318,5 +319,23 @@ describe('mode inference hysteresis (Step7)', () => {
     const boot = classifyFix(createInitialTrajectoryState(), fixAt(0, 0, 0));
     const { state } = warmUp(boot.newState, 0, 0, 3, 1.2, 10);
     expect(state.mode).toBe(MOVEMENT_MODE.WALKING);
+  });
+});
+
+describe('mode ordering (Step22)', () => {
+  test('WALKING has CYCLING and VEHICLE as faster modes, in order', () => {
+    expect(nextFasterModes(MOVEMENT_MODE.WALKING)).toEqual([MOVEMENT_MODE.CYCLING, MOVEMENT_MODE.VEHICLE]);
+  });
+
+  test('CYCLING has only VEHICLE as a faster mode', () => {
+    expect(nextFasterModes(MOVEMENT_MODE.CYCLING)).toEqual([MOVEMENT_MODE.VEHICLE]);
+  });
+
+  test('VEHICLE has no faster mode', () => {
+    expect(nextFasterModes(MOVEMENT_MODE.VEHICLE)).toEqual([]);
+  });
+
+  test('UNKNOWN has no faster mode (its ceiling already equals VEHICLE\'s)', () => {
+    expect(nextFasterModes(MOVEMENT_MODE.UNKNOWN)).toEqual([]);
   });
 });
