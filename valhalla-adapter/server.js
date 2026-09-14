@@ -6,7 +6,7 @@ const { groupBySegment, buildTraceAttributesRequest, traceAttributesToSegment } 
 const PORT = Number(process.env.PORT ?? 8787);
 const VALHALLA_URL = process.env.VALHALLA_URL ?? 'http://localhost:8002';
 
-async function matchSegment(segmentId, points) {
+async function matchSegment(segmentId, points, costing) {
   // Valhalla's map matching needs at least two points to establish a trace; a lone point can only
   // ever be UNMATCHED, so skip the round trip and let the client's own fallback (raw GPS) stand —
   // per MAP_MATCHING.md, a matcher must never be the reason tracking/display breaks.
@@ -14,7 +14,7 @@ async function matchSegment(segmentId, points) {
   const response = await fetch(`${VALHALLA_URL}/trace_attributes`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(buildTraceAttributesRequest(points)),
+    body: JSON.stringify(buildTraceAttributesRequest(points, { costing })),
   });
   if (!response.ok) throw new Error(`valhalla_http_${response.status}`);
   const body = await response.json();
@@ -35,12 +35,15 @@ async function handleMatch(req, res) {
 
   const points = Array.isArray(payload?.points) ? payload.points : [];
   const groups = groupBySegment(points);
+  // RaahMitra's client sends its Valhalla costing model as `profile` (see routeMatching.js /
+  // trackingConfig.js MATCHER_PROFILE_BY_MODE) — 'pedestrian' for walk, 'bicycle' for bike.
+  const costing = typeof payload?.profile === 'string' ? payload.profile : 'pedestrian';
 
   // One segment failing to reach Valhalla (network hiccup, extract doesn't cover that area, etc.)
   // must not take the rest of the session down with it — resolve each segment independently and
   // simply omit ones that error, so the client's own per-segment fallback covers the gap.
   const settled = await Promise.allSettled(
-    [...groups.entries()].map(([segmentId, segmentPoints]) => matchSegment(segmentId, segmentPoints)),
+    [...groups.entries()].map(([segmentId, segmentPoints]) => matchSegment(segmentId, segmentPoints, costing)),
   );
   const segments = settled
     .filter((result) => result.status === 'fulfilled')

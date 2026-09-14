@@ -197,6 +197,82 @@ test('New ISBT Shimla regression: a real mostly-stationary session must not let 
   assert.ok(maxDriftM < 30, `expected filtered position to stay within ~30m of raw GPS for a stationary session, got ${maxDriftM}m`);
 });
 
+// --- Bike profile fixture: steady ride, a 90-degree turn, a traffic-light stop ---
+const bikeOrigin = { latitude: 31.05, longitude: 77.05 };
+function bikeFix(id, offsetMs, east, north, accuracy = 10) {
+  const point = fromLocalMeters(east, north, bikeOrigin);
+  return {
+    id, timestamp: base + offsetMs, received_timestamp_ms: base + offsetMs,
+    latitude: point.latitude, longitude: point.longitude, accuracy, method: 'fused',
+  };
+}
+
+function buildBikeSession() {
+  const points = [];
+  let id = 1;
+  let t = 0;
+  // Steady eastward ride at 7 m/s for 6 seconds.
+  for (let i = 0; i <= 6; i += 1) {
+    points.push(bikeFix(id, t, 7 * i, 0));
+    id += 1; t += 1000;
+  }
+  // Sharp 90-degree turn: now heads due north at the same pace for 6 more seconds.
+  const turnEast = 7 * 6;
+  for (let i = 1; i <= 6; i += 1) {
+    points.push(bikeFix(id, t, turnEast, 7 * i));
+    id += 1; t += 1000;
+  }
+  // Traffic-light stop: ~8 seconds of small GPS drift (sub-1m/s implied speed) within the bike
+  // stationary radius — real GPS jitter while parked, not a rhythmic full-amplitude bounce.
+  const stopEast = turnEast;
+  const stopNorth = 7 * 6;
+  for (let i = 1; i <= 8; i += 1) {
+    const jitter = (i % 2 === 0) ? 0.3 : -0.3;
+    points.push(bikeFix(id, t, stopEast + jitter, stopNorth + jitter, 12));
+    id += 1; t += 1000;
+  }
+  return points;
+}
+
+test('bike profile: steady pace and a hard turn are accepted, not flagged as impossible speed', () => {
+  const session = buildBikeSession();
+  const result = processLocations(session, { mode: 'bike', nowMs: base + 20000 });
+  const rideAndTurn = result.slice(0, 13);
+  assert.ok(rideAndTurn.every((row) => row.trajectory_reason !== 'IMPOSSIBLE_SPEED'),
+    'steady ~7 m/s bike pace must not be rejected as impossible under the bike profile');
+  assert.ok(rideAndTurn.filter((row) => row.trajectory_decision === 'ACCEPTED').length >= 10,
+    'most of the steady ride + turn should be accepted');
+});
+
+test('bike profile: a sustained 90-degree turn is detected and relaxes smoothing', () => {
+  const session = buildBikeSession();
+  const result = processLocations(session, { mode: 'bike', nowMs: base + 20000 });
+  assert.ok(result.some((row) => row.turn_detected === 1), 'expected at least one turn_detected fix around the 90-degree bend');
+});
+
+test('bike profile: a fast downhill burst within bike\'s speed ceiling would be IMPOSSIBLE_SPEED under walk', () => {
+  // 20 m/s (72 km/h) is below bike's extremePhysicalSpeedMps (30) but above walk's (15) — the
+  // absolute safety ceiling itself, not the accuracy-margined displacement check, is what should
+  // differ between profiles here.
+  const burst = [
+    bikeFix(1, 0, 0, 0),
+    bikeFix(2, 3000, 60, 0), // 60m in 3s = 20 m/s
+  ];
+  const bikeResult = processLocations(burst, { mode: 'bike', nowMs: base + 3000 });
+  const walkResult = processLocations(burst, { mode: 'walk', nowMs: base + 3000 });
+  assert.notEqual(bikeResult[1].trajectory_reason, 'IMPOSSIBLE_SPEED');
+  assert.equal(walkResult[1].trajectory_reason, 'IMPOSSIBLE_SPEED');
+});
+
+test('bike profile: a traffic-light stop produces a stationary anchor and adds no artificial distance', () => {
+  const session = buildBikeSession();
+  const result = processLocations(session, { mode: 'bike', nowMs: base + 20000 });
+  const stopPhase = result.slice(-8);
+  assert.ok(stopPhase.some((row) => row.stationary_anchor_latitude != null), 'expected a stationary anchor once stopped');
+  assert.ok(stopPhase.filter((row) => row.is_route_point === 1).length <= 1,
+    'jitter around a stop must not keep extending the route');
+});
+
 test('delayed accurate fixes remain historical trajectory evidence', () => {
   const result = processLocations([
     { ...fix(1, 0, 28.6, 77.2), received_timestamp_ms: base + 25000 },

@@ -30,11 +30,13 @@ function toValhallaShape(points) {
 
 // shape_match: 'map_snap' — our GPS trace does not closely follow Valhalla edges (that's the whole
 // point of matching it), so this must not be 'edge_walk' (reserved for shapes already snapped by a
-// prior Valhalla route).
-function buildTraceAttributesRequest(points) {
+// prior Valhalla route). costing is caller-driven (RaahMitra's walk/bike mode maps to Valhalla's
+// pedestrian/bicycle costing models in trackingConfig.js MATCHER_PROFILE_BY_MODE) — never assume
+// pedestrian, a bicycle trace matched against pedestrian-only edges will pick the wrong path.
+function buildTraceAttributesRequest(points, { costing = 'pedestrian' } = {}) {
   return {
     shape: toValhallaShape(points),
-    costing: 'pedestrian',
+    costing,
     shape_match: 'map_snap',
   };
 }

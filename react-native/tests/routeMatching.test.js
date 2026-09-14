@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
-  buildGpsRouteSegments, classifyConfidence, resolveSegment, matchWalkingSequence,
+  buildGpsRouteSegments, classifyConfidence, resolveSegment, matchSequence, matchSequenceChunked,
 } = require('../routeMatching');
 
 function row({ id, segmentId, lat, lon, t, continuity = 'CONTINUOUS' }) {
@@ -95,12 +95,47 @@ test('UNMATCHED falls back to processed GPS', () => {
   assert.equal(resolveSegment(null, fallback).segmentType, 'RAW_GPS');
 });
 
+test('matchSequence requests bicycle costing and bike-appropriate highways for bike mode', async () => {
+  const originalFetch = global.fetch;
+  let capturedBody = null;
+  global.fetch = async (endpoint, options) => {
+    capturedBody = JSON.parse(options.body);
+    return { ok: true, json: async () => ({ segments: [] }) };
+  };
+  try {
+    const rows = [row({ id: 1, segmentId: 0, lat: 31.1, lon: 77.1, t: 0 }), row({ id: 2, segmentId: 0, lat: 31.1001, lon: 77.1001, t: 1000 })];
+    await matchSequence(rows, { endpoint: 'https://matcher.example/trace', mode: 'bike' });
+    assert.equal(capturedBody.profile, 'bicycle');
+    assert.ok(capturedBody.allowed_highways.includes('cycleway'));
+    assert.ok(!capturedBody.allowed_highways.includes('footway'));
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test('matchSequence defaults to pedestrian costing when mode is omitted (walk back-compat)', async () => {
+  const originalFetch = global.fetch;
+  let capturedBody = null;
+  global.fetch = async (endpoint, options) => {
+    capturedBody = JSON.parse(options.body);
+    return { ok: true, json: async () => ({ segments: [] }) };
+  };
+  try {
+    const rows = [row({ id: 1, segmentId: 0, lat: 31.1, lon: 77.1, t: 0 }), row({ id: 2, segmentId: 0, lat: 31.1001, lon: 77.1001, t: 1000 })];
+    await matchSequence(rows, { endpoint: 'https://matcher.example/trace' });
+    assert.equal(capturedBody.profile, 'pedestrian');
+    assert.ok(capturedBody.allowed_highways.includes('footway'));
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
 test('matcher unavailable (network failure) still returns a usable fallback route', async () => {
   const originalFetch = global.fetch;
   global.fetch = async () => { throw new Error('network down'); };
   try {
     const rows = [row({ id: 1, segmentId: 0, lat: 31.1, lon: 77.1, t: 0 }), row({ id: 2, segmentId: 0, lat: 31.1001, lon: 77.1001, t: 5000 })];
-    const segments = await matchWalkingSequence(rows, { endpoint: 'https://matcher.example/trace' });
+    const segments = await matchSequence(rows, { endpoint: 'https://matcher.example/trace' });
     assert.equal(segments.length, 1);
     assert.equal(segments[0].segmentType, 'RAW_GPS');
   } finally {
@@ -129,9 +164,59 @@ test('hybrid route: HIGH, LOW, HIGH confidence segments render as MAP_MATCHED, R
     }),
   });
   try {
-    const segments = await matchWalkingSequence(rows, { endpoint: 'https://matcher.example/trace' });
+    const segments = await matchSequence(rows, { endpoint: 'https://matcher.example/trace' });
     assert.deepEqual(segments.map((s) => s.segmentType), ['MAP_MATCHED', 'RAW_GPS', 'MAP_MATCHED']);
   } finally {
     global.fetch = originalFetch;
   }
+});
+
+test('matchSequenceChunked leaves a short segment as a single matcher call', async () => {
+  const originalFetch = global.fetch;
+  let callCount = 0;
+  global.fetch = async () => {
+    callCount += 1;
+    return { ok: true, json: async () => ({ segments: [{ segmentId: 0, confidence: 'HIGH', coordinates: [[77.1, 31.1], [77.1005, 31.1005]], matchedWayId: 'way/a' }] }) };
+  };
+  try {
+    const rows = [
+      row({ id: 1, segmentId: 0, lat: 31.1, lon: 77.1, t: 0 }),
+      row({ id: 2, segmentId: 0, lat: 31.1005, lon: 77.1005, t: 1000 }),
+    ];
+    const segments = await matchSequenceChunked(rows, { endpoint: 'https://matcher.example/trace', chunkThreshold: 40 });
+    assert.equal(callCount, 1, 'a short segment must not be split into windows');
+    assert.equal(segments[0].segmentType, 'MAP_MATCHED');
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test('matchSequenceChunked splits a long segment into overlapping windows and stitches the result', async () => {
+  const originalFetch = global.fetch;
+  let callCount = 0;
+  global.fetch = async () => {
+    callCount += 1;
+    const lat = 31.1 + callCount * 0.001;
+    return {
+      ok: true,
+      json: async () => ({ segments: [{ segmentId: 0, confidence: 'HIGH', coordinates: [[77.1, lat], [77.1, lat + 0.0001]], matchedWayId: `way/${callCount}` }] }),
+    };
+  };
+  try {
+    const rows = Array.from({ length: 60 }, (_, i) => row({ id: i + 1, segmentId: 0, lat: 31.1 + i * 0.0001, lon: 77.1, t: i * 1000 }));
+    const segments = await matchSequenceChunked(rows, { endpoint: 'https://matcher.example/trace', chunkThreshold: 40, windowSize: 25, overlapSize: 5 });
+    assert.ok(callCount > 1, 'a 60-point segment above the chunk threshold must be split into more than one matcher call');
+    assert.equal(segments.length, 1, 'still resolves to one logical segment');
+    assert.equal(segments[0].segmentType, 'MAP_MATCHED');
+    assert.ok(segments[0].coordinates.length >= 2);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test('matchSequenceChunked falls back gracefully when no endpoint is configured', async () => {
+  const rows = Array.from({ length: 60 }, (_, i) => row({ id: i + 1, segmentId: 0, lat: 31.1 + i * 0.0001, lon: 77.1, t: i * 1000 }));
+  const segments = await matchSequenceChunked(rows, { endpoint: null, chunkThreshold: 40 });
+  assert.equal(segments.length, 1);
+  assert.equal(segments[0].segmentType, 'RAW_GPS');
 });

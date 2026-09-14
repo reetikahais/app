@@ -61,6 +61,14 @@ function angleDifference(a, b) {
   return difference > 180 ? 360 - difference : difference;
 }
 
+// Circular weighted blend of two headings (degrees), e.g. a calculated bearing and a device-reported
+// one. weight=0 returns `a` unchanged, weight=1 returns `b` unchanged.
+function blendAngles(a, b, weight) {
+  const clampedWeight = clamp(weight, 0, 1);
+  const diff = ((b - a + 540) % 360) - 180;
+  return (a + diff * clampedWeight + 360) % 360;
+}
+
 function normalizeFix(input, nowMs = Date.now()) {
   const coords = input.coords || input;
   const fixTimestampMs = timestampMs(input.fix_timestamp_ms ?? input.timestamp_ms ?? input.timestamp ?? input.fixTimestampMs);
@@ -107,7 +115,7 @@ function computeProgressiveMovement(windowPositions, config) {
   return { netDisplacementM, pathDistanceM, progressRatio, hasProgressiveMovement };
 }
 
-function updateMovement(previous, fix, elapsedMs, displacementM, config, evidence, hasProgressiveMovement) {
+function updateMovement(previous, fix, elapsedMs, displacementM, config, evidence, hasProgressiveMovement, turnDetected) {
   const speed = fix.speed_mps ?? (elapsedMs > 0 ? displacementM / elapsedMs * 1000 : 0);
   const reliable = fix.accuracy != null && fix.accuracy <= config.normalAccuracyMaxM && fix.fix_age_ms <= config.freshThresholdMs;
   if (!reliable) return previous || 'UNKNOWN';
@@ -132,7 +140,10 @@ function updateMovement(previous, fix, elapsedMs, displacementM, config, evidenc
   if (movingEvidence) {
     evidence.movingMs += Math.max(elapsedMs || 0, 0);
     evidence.stationaryMs = 0;
-    return evidence.movingMs >= config.movingConfirmationMs ? 'MOVING' : 'POSSIBLY_MOVING';
+    const confirmed = evidence.movingMs >= config.movingConfirmationMs;
+    if (!config.extendedMovementStates) return confirmed ? 'MOVING' : 'POSSIBLY_MOVING';
+    if (!confirmed) return (previous === 'STATIONARY' || previous === 'POSSIBLY_STOPPED') ? 'RESUMING' : 'STARTING';
+    return turnDetected ? 'TURNING' : 'MOVING';
   }
   if (stationaryEvidence) {
     evidence.stationaryMs += Math.max(elapsedMs || 0, 0);
@@ -149,7 +160,7 @@ function updateMovement(previous, fix, elapsedMs, displacementM, config, evidenc
 }
 
 function processLocations(rawLocations, options = {}) {
-  const config = { ...require('./trackingConfig').PROCESSING_CONFIG, ...options };
+  const config = { ...require('./trackingConfig').getTrackingProfile(options.mode || 'walk'), ...options };
   const normalized = rawLocations.map((fix) => normalizeFix(fix, options.nowMs || Date.now()))
     .filter((fix) => fix.latitude != null && fix.longitude != null && fix.fix_timestamp_ms != null)
     .sort((a, b) => a.fix_timestamp_ms - b.fix_timestamp_ms);
@@ -162,9 +173,12 @@ function processLocations(rawLocations, options = {}) {
   const acceptedSpeeds = [];
   const recentAcceptedPositions = [];
   let previousAcceptedBearing = null;
+  let previousAcceptedImpliedSpeed = null;
   let movementState = 'UNKNOWN';
   const movementEvidence = { movingMs: 0, stationaryMs: 0 };
   let segmentId = 0;
+  let stationaryAnchor = null;
+  let consecutiveUncertainCount = 0;
   const results = [];
   const seen = [];
 
@@ -186,9 +200,19 @@ function processLocations(rawLocations, options = {}) {
     const impliedSpeed = acceptedElapsedSeconds ? previousDistance / acceptedElapsedSeconds : null;
     const reportedSpeed = fix.speed_mps != null && fix.speed_mps >= 0 ? fix.speed_mps : null;
     const recentMedianSpeed = median(acceptedSpeeds);
-    const currentBearing = lastAcceptedFix && previousDistance > 1 ? bearingBetween(lastAcceptedFix, fix) : null;
+    const calculatedBearing = lastAcceptedFix && previousDistance > 1 ? bearingBetween(lastAcceptedFix, fix) : null;
+    // Device-reported heading is blended in (weighted by headingImportance) only when the calculated
+    // bearing already exists — it refines a real bearing estimate, it never substitutes for one, since
+    // a stale/parked heading value is common and must not fabricate motion direction on its own.
+    const deviceHeading = fix.bearing_deg != null && (fix.bearing_accuracy_deg == null || fix.bearing_accuracy_deg <= 45)
+      ? fix.bearing_deg : null;
+    const currentBearing = calculatedBearing != null && deviceHeading != null
+      ? blendAngles(calculatedBearing, deviceHeading, config.headingImportance)
+      : calculatedBearing;
     const bearingChange = currentBearing != null && previousAcceptedBearing != null
       ? angleDifference(currentBearing, previousAcceptedBearing) : null;
+    const acceleration = (impliedSpeed != null && previousAcceptedImpliedSpeed != null && acceptedElapsedSeconds)
+      ? Math.abs(impliedSpeed - previousAcceptedImpliedSpeed) / acceptedElapsedSeconds : null;
     // gapCandidate alone still governs filter re-anchoring and movement-state resets below, unchanged
     // from before. A long sampling gap with only a small displacement and reasonable accuracy is
     // almost always the OS delivering fixes late (screen lock, network throttling), not a real
@@ -201,8 +225,8 @@ function processLocations(rawLocations, options = {}) {
     const gap = gapCandidate && !isSamplingDelay;
     const uncertaintyAllowance = (fix.accuracy ?? config.normalAccuracyMaxM)
       + (lastAcceptedFix?.accuracy ?? config.normalAccuracyMaxM);
-    const plausibleSpeed = Math.min(config.walkingBurstSpeedMps,
-      Math.max(config.walkingPlausibleSpeedMps, (recentMedianSpeed || 0) * 2.5));
+    const plausibleSpeed = Math.min(config.burstSpeedMps,
+      Math.max(config.plausibleSpeedMps, (recentMedianSpeed || 0) * 2.5));
     const maximumPlausibleDistance = plausibleSpeed * Math.max(acceptedElapsedSeconds || 0, 0)
       + uncertaintyAllowance * config.uncertaintyAccuracyFactor + config.dynamicDistanceSafetyMarginM;
     let trajectoryDecision = 'ACCEPTED';
@@ -223,15 +247,22 @@ function processLocations(rawLocations, options = {}) {
       trajectoryDecision = 'OUTLIER'; trajectoryReason = 'EXCESSIVE_DISPLACEMENT';
     } else if (impliedSpeed != null && reportedSpeed != null && Math.abs(impliedSpeed - reportedSpeed) > 5) {
       trajectoryDecision = 'UNCERTAIN'; trajectoryReason = 'SPEED_MISMATCH';
-    } else if (bearingChange != null && bearingChange > config.bearingPenaltyThresholdDeg && previousDistance > 40 && impliedSpeed > config.walkingPlausibleSpeedMps * 1.5) {
+    } else if (bearingChange != null && bearingChange > config.bearingPenaltyThresholdDeg && previousDistance > 40 && impliedSpeed > config.plausibleSpeedMps * 1.5) {
       trajectoryDecision = 'UNCERTAIN'; trajectoryReason = 'BEARING_INCONSISTENCY';
+    } else if (
+      acceleration != null && acceleration > config.maxAccelerationMps2
+      && impliedSpeed != null && impliedSpeed > config.plausibleSpeedMps
+    ) {
+      // A confidence signal, not a rejector (section 8): only ever downgrades an otherwise-plausible
+      // fix to UNCERTAIN, never on its own escalates to OUTLIER — real bikes brake/accelerate hard.
+      trajectoryDecision = 'UNCERTAIN'; trajectoryReason = 'HIGH_ACCELERATION';
     }
     // Candidate confirmation (Fix 4): a fix that looks implausible measured straight from
     // lastAcceptedFix (A) can still be trustworthy if it forms a coherent walking pace with the
     // immediately preceding UNCERTAIN fix (X) — i.e. the walker plausibly moved A -> X -> Y.
     // Never applies to DUPLICATE/INVALID_TIMESTAMP/LOW_CONFIDENCE/IMPOSSIBLE_SPEED: those reflect
     // a problem with the fix itself (or the absolute safety ceiling), not just an A->Y comparison.
-    const confirmableReasons = ['SPEED_MISMATCH', 'BEARING_INCONSISTENCY', 'EXCESSIVE_DISPLACEMENT'];
+    const confirmableReasons = ['SPEED_MISMATCH', 'BEARING_INCONSISTENCY', 'EXCESSIVE_DISPLACEMENT', 'HIGH_ACCELERATION'];
     let confirmedFromPending = false;
     if (trajectoryDecision !== 'ACCEPTED' && confirmableReasons.includes(trajectoryReason) && pendingUncertain && lastAcceptedFix) {
       const elapsedXYms = fix.fix_timestamp_ms - pendingUncertain.fix_timestamp_ms;
@@ -252,7 +283,7 @@ function processLocations(rawLocations, options = {}) {
     const accepted = trajectoryDecision === 'ACCEPTED';
     if (accepted) {
       pendingUncertain = null;
-    } else if (trajectoryDecision === 'UNCERTAIN' && ['SPEED_MISMATCH', 'BEARING_INCONSISTENCY'].includes(trajectoryReason)) {
+    } else if (trajectoryDecision === 'UNCERTAIN' && ['SPEED_MISMATCH', 'BEARING_INCONSISTENCY', 'HIGH_ACCELERATION'].includes(trajectoryReason)) {
       // Only trajectory-shape uncertainty becomes a confirmation candidate — a fix that is
       // uncertain because of its own poor accuracy (LOW_CONFIDENCE) is not trustworthy enough
       // to anchor a future confirmation, even if a later fix lands close to it.
@@ -274,7 +305,24 @@ function processLocations(rawLocations, options = {}) {
       ? [...recentAcceptedPositions, { latitude: fix.latitude, longitude: fix.longitude }]
       : [];
     const { hasProgressiveMovement } = computeProgressiveMovement(movementWindow, config);
-    if (accepted) movementState = updateMovement(movementState, fix, acceptedElapsedMs || 0, previousDistance, config, movementEvidence, hasProgressiveMovement);
+    // Gated on real progressive movement, not just any bearing swing: a stationary phone's GPS
+    // wanders in every direction within the noise floor, which would otherwise look like a sharp
+    // "turn" on every single fix. A turn only means something once actual directional travel is
+    // established (section 12) — this also keeps walking output unaffected while merely standing.
+    const turnDetected = accepted && hasProgressiveMovement
+      && bearingChange != null && bearingChange > config.turnDetectionThresholdDeg;
+    if (accepted) {
+      movementState = updateMovement(movementState, fix, acceptedElapsedMs || 0, previousDistance, config, movementEvidence, hasProgressiveMovement, turnDetected);
+      consecutiveUncertainCount = 0;
+    } else if (trajectoryDecision === 'UNCERTAIN') {
+      consecutiveUncertainCount += 1;
+      // Distinct from POSSIBLY_STOPPED/STATIONARY: several UNCERTAIN fixes in a row mean GPS itself
+      // is unreliable right now, not that the user stopped moving — only meaningful for modes that
+      // use the extended state set (bike), so walking's movement_state values are untouched.
+      if (config.extendedMovementStates && consecutiveUncertainCount >= 2 && movementState !== 'STATIONARY') {
+        movementState = 'GPS_UNCERTAIN';
+      }
+    }
     let status = trajectoryDecision === 'ACCEPTED'
       ? (isLiveFresh ? 'FRESH_ACCEPTED' : 'HISTORICAL_ACCEPTED')
       : trajectoryDecision === 'OUTLIER' ? 'OUTLIER' : 'PENDING_CONFIRMATION';
@@ -284,10 +332,27 @@ function processLocations(rawLocations, options = {}) {
     else if (fallback) { status = stale ? 'STALE_FALLBACK' : 'FRESH_LOW_CONFIDENCE'; reason = 'fallback_not_trusted_for_solid_route'; }
     else if (stale && !accepted) { status = 'STALE_FALLBACK'; reason = 'fix_age_exceeds_freshness_threshold'; }
     else if (gap) { reason = 'active_gap_creates_new_segment'; }
+    // Stationary anchor (section 10): the anchor is set/refreshed once entering a stationary-ish
+    // state and every subsequent fix is graded against ITS radius, not just distance from the last
+    // accepted fix — a formalization of the noise-floor check that also gives the debug viewer a
+    // concrete point to draw. Anchor radius/suppression math is unchanged from before for a fix that
+    // stays within the noise floor, so walking output is identical; the anchor object itself is new.
+    const isStationaryish = movementState === 'STATIONARY' || movementState === 'POSSIBLY_STOPPED';
+    if (accepted && isStationaryish && !hasProgressiveMovement) {
+      const anchorRadius = Math.max(config.stationaryRadiusMeters, (fix.accuracy || 0) * config.stationaryAccuracyMultiplier);
+      if (!stationaryAnchor) {
+        stationaryAnchor = { latitude: fix.latitude, longitude: fix.longitude, radiusM: anchorRadius, sinceMs: fix.fix_timestamp_ms, confidence: 'MEDIUM' };
+      } else {
+        stationaryAnchor.radiusM = anchorRadius;
+        stationaryAnchor.confidence = movementState === 'STATIONARY' ? 'HIGH' : 'MEDIUM';
+      }
+    } else if (accepted && movementState === 'MOVING') {
+      stationaryAnchor = null;
+    }
     if (
       accepted
       && !hasProgressiveMovement
-      && (movementState === 'STATIONARY' || movementState === 'POSSIBLY_STOPPED')
+      && isStationaryish
       && previousDistance <= Math.max(config.stationaryNoiseFloorM, (fix.accuracy || 0) * config.stationaryAccuracyMultiplier)
     ) {
       reason = 'stationary_noise_suppressed';
@@ -316,7 +381,12 @@ function processLocations(rawLocations, options = {}) {
       const maxSpeed = config.extremePhysicalSpeedMps;
       state.velocityEast = clamp((state.east - previousFilteredEast) / velocityDt, -maxSpeed, maxSpeed);
       state.velocityNorth = clamp((state.north - previousFilteredNorth) / velocityDt, -maxSpeed, maxSpeed);
-      state.variance = Math.max(1, (1 - gain) * state.variance + 4 * dt);
+      // On a detected turn, inject extra process noise (scaled by how little smoothing
+      // turnSmoothingStrength calls for) so NEXT step's gain trusts the fresh GPS fix more instead of
+      // cutting the corner toward the pre-turn trajectory (section 11-12). Off a turn, this reduces to
+      // exactly the original constant (4 * dt) — walking output is unchanged unless a turn fires.
+      const turnBoost = turnDetected ? (4 * dt) * (1 / Math.max(config.turnSmoothingStrength, 0.01) - 1) : 0;
+      state.variance = Math.max(1, (1 - gain) * state.variance + 4 * dt + turnBoost);
     }
     const filtered = fromLocalMeters(state.east, state.north, origin);
     const innovationM = lastAcceptedFix ? haversineMeters(filtered.latitude, filtered.longitude, fix.latitude, fix.longitude) : 0;
@@ -342,6 +412,9 @@ function processLocations(rawLocations, options = {}) {
       distance_from_last_accepted_m: previousDistance, elapsed_time_ms: acceptedElapsedMs,
       implied_speed_mps: impliedSpeed, reported_speed_mps: reportedSpeed,
       recent_median_speed_mps: recentMedianSpeed, bearing: currentBearing, bearing_change: bearingChange,
+      turn_detected: turnDetected ? 1 : 0, acceleration_mps2: acceleration,
+      stationary_anchor_latitude: stationaryAnchor?.latitude ?? null,
+      stationary_anchor_longitude: stationaryAnchor?.longitude ?? null,
       accepted_reference_latitude: lastAcceptedFix?.latitude ?? null,
       accepted_reference_longitude: lastAcceptedFix?.longitude ?? null,
     });
@@ -350,6 +423,7 @@ function processLocations(rawLocations, options = {}) {
       if (impliedSpeed != null && Number.isFinite(impliedSpeed)) acceptedSpeeds.push(impliedSpeed);
       if (acceptedSpeeds.length > config.recentSpeedHistoryLength) acceptedSpeeds.shift();
       if (currentBearing != null) previousAcceptedBearing = currentBearing;
+      if (impliedSpeed != null && Number.isFinite(impliedSpeed)) previousAcceptedImpliedSpeed = impliedSpeed;
       recentAcceptedPositions.push({ latitude: fix.latitude, longitude: fix.longitude });
       if (recentAcceptedPositions.length > config.progressiveMovementWindowSize) recentAcceptedPositions.shift();
       lastAcceptedFix = fix;
@@ -365,5 +439,5 @@ function routeLength(points, latKey = 'latitude', lonKey = 'longitude') {
 
 if (typeof module !== 'undefined') module.exports = {
   haversineMeters, toLocalMeters, fromLocalMeters, percentile, normalizeFix, processLocations, routeLength,
-  computeProgressiveMovement,
+  computeProgressiveMovement, bearingBetween, angleDifference, blendAngles,
 };

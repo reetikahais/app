@@ -10,12 +10,16 @@ import { File, Paths } from 'expo-file-system';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { LOCATION_TASK_NAME, APP_STATE_KEY } from './trackingConfig';
 import { countLogs, clearLogs, getAllLogs, getAllRawLocations, getAllProcessedLocations, updateMatchDiagnostics } from './db';
-import { MATCHER_ENDPOINT, PROCESSING_CONFIG, TRACKING_PROFILES, ACTIVE_PROFILE_KEY } from './trackingConfig';
+import {
+  MATCHER_ENDPOINT, ACTIVE_PROFILE_KEY, TRACKING_MODE_KEY, TRACKING_MODES,
+  MODE_PROFILES, BASE_PROCESSING_CONFIG, POLLING_PROFILES, getPollingProfile, getTrackingProfile,
+} from './trackingConfig';
 import { buildAnimatedMapHtml } from './animatedMapExport';
 import {
-  buildGpsRouteSegments, matchWalkingSequence, resolveSegment,
+  buildGpsRouteSegments, matchSequence, matchSequenceChunked, resolveSegment,
   collectMatchDiagnostics, MATCHER_VERSION,
 } from './routeMatching';
+import { createRoadState, updateRoadState, splitCommittedTentative } from './routeConfidence';
 import { computeSessionStats } from './sessionStats';
 import {
   logEvent,
@@ -27,6 +31,26 @@ import {
 
 const LIVE_MATCH_THROTTLE_MS = 10000;
 const LIVE_MATCH_TAIL_POINTS = 15;
+const BATTERY_OPT_REQUESTED_KEY = 'battery_optimization_requested';
+
+// Android refuses to start a foreground service while the app is backgrounded. Returning from a
+// system settings/permission screen can land here a beat before the app is reported active again,
+// so give it a moment to catch up rather than racing Location.startLocationUpdatesAsync.
+function waitForAppActive() {
+  if (AppState.currentState === 'active') return Promise.resolve();
+  return new Promise((resolve) => {
+    const sub = AppState.addEventListener('change', (next) => {
+      if (next === 'active') {
+        sub.remove();
+        resolve();
+      }
+    });
+    setTimeout(() => {
+      sub.remove();
+      resolve();
+    }, 3000);
+  });
+}
 
 // Loaded once; live updates after this are pushed in via injectJavaScript (window.updateRoute /
 // window.updateLive) instead of replacing `source`, so the live marker animates smoothly instead
@@ -62,9 +86,9 @@ window.updateRoute = function (routesJson) {
     route.coordinates.forEach((coordinate) => bounds.push(coordinate));
     L.polyline(route.coordinates, {
       color: route.type === 'MAP_MATCHED' ? '#2f8f4e' : (route.type === 'GAP' ? '#9aa5ad' : '#d39b22'),
-      weight: 5,
-      opacity: route.type === 'GAP' ? 0.5 : 0.9,
-      dashArray: route.type === 'GAP' ? '8 8' : null
+      weight: route.tentative ? 4 : 5,
+      opacity: route.type === 'GAP' ? 0.5 : (route.tentative ? 0.55 : 0.9),
+      dashArray: route.type === 'GAP' ? '8 8' : (route.tentative ? '4 6' : null)
     }).addTo(routeLayer);
   });
   if (routes[0] && routes[0].coordinates[0]) L.marker(routes[0].coordinates[0]).addTo(routeLayer).bindPopup('Start');
@@ -95,10 +119,20 @@ window.updateLive = function (lat, lng, accuracyM) {
 </script></body></html>`;
 }
 
+// The mode picker re-enables once stopped, so a user could switch it before pressing Export —
+// export/finalize must reflect what the session was actually recorded with, not whatever the
+// picker currently shows. tracking_mode is stamped on every raw row (locationTask.js), so the
+// recorded rows are the source of truth; the current picker state is only a fallback for an
+// empty/legacy session.
+function sessionModeFromRows(rawRows, fallbackMode) {
+  return rawRows.find((row) => row.tracking_mode)?.tracking_mode || fallbackMode;
+}
+
 function segmentsToRouteJson(segments) {
   return JSON.stringify(segments.map((segment) => ({
     type: segment.segmentType,
     coordinates: segment.coordinates.map((point) => [point.latitude, point.longitude]),
+    tentative: Boolean(segment.tentative),
   })));
 }
 
@@ -112,6 +146,7 @@ export default function App() {
 
 function AppContent() {
   const insets = useSafeAreaInsets();
+  const [trackingMode, setTrackingMode] = useState(TRACKING_MODES.WALK);
   const [running, setRunning] = useState(false);
   const [count, setCount] = useState(0);
   const [rawCount, setRawCount] = useState(0);
@@ -123,6 +158,7 @@ function AppContent() {
   const webViewRef = useRef(null);
   const webViewReady = useRef(false);
   const matchedCacheRef = useRef(new Map());
+  const roadStateBySegment = useRef(new Map());
   const lastLiveMatchAt = useRef(0);
   const pendingRouteJson = useRef(null);
   const pendingLive = useRef(null);
@@ -164,10 +200,13 @@ function AppContent() {
     });
 
     Location.hasStartedLocationUpdatesAsync(LOCATION_TASK_NAME).then(setRunning);
+    AsyncStorage.getItem(TRACKING_MODE_KEY).then((stored) => {
+      if (stored === TRACKING_MODES.WALK || stored === TRACKING_MODES.BIKE) setTrackingMode(stored);
+    });
 
     // Bounded live map matching (section 36): only the tail of the currently open segment is
     // (re)matched, on a throttle, and each closed segment is matched at most once. No endpoint
-    // configured means matchWalkingSequence resolves instantly to the GPS fallback, so this stays
+    // configured means matchSequence resolves instantly to the GPS fallback, so this stays
     // cheap even while disabled.
     async function refreshLiveMatching(fallbackSegments, rowsByRawFixId) {
       if (!MATCHER_ENDPOINT || !fallbackSegments.length) return;
@@ -175,7 +214,7 @@ function AppContent() {
       for (const segment of closed) {
         if (matchedCacheRef.current.has(segment.segmentId)) continue;
         const segRows = segment.rawFixIds.map((id) => rowsByRawFixId.get(id)).filter(Boolean);
-        const [resolved] = await matchWalkingSequence(segRows, { endpoint: MATCHER_ENDPOINT });
+        const [resolved] = await matchSequence(segRows, { endpoint: MATCHER_ENDPOINT, mode: trackingMode });
         if (resolved) matchedCacheRef.current.set(segment.segmentId, resolved);
       }
       const open = fallbackSegments[fallbackSegments.length - 1];
@@ -184,8 +223,20 @@ function AppContent() {
         lastLiveMatchAt.current = now;
         const tailIds = open.rawFixIds.slice(-LIVE_MATCH_TAIL_POINTS);
         const tailRows = tailIds.map((id) => rowsByRawFixId.get(id)).filter(Boolean);
-        const [resolved] = await matchWalkingSequence(tailRows, { endpoint: MATCHER_ENDPOINT });
-        if (resolved) matchedCacheRef.current.set(open.segmentId, resolved);
+        const [resolved] = await matchSequence(tailRows, { endpoint: MATCHER_ENDPOINT, mode: trackingMode });
+        if (resolved) {
+          matchedCacheRef.current.set(open.segmentId, resolved);
+          // Road-lock (sections 17-19): track which way this segment's tail is currently matched
+          // to, and only let a different candidate take over after enough consecutive corroborated
+          // observations — a single closer-looking match on a parallel road is not enough evidence.
+          const candidate = resolved.matchedWayId != null
+            ? { matchedWayId: resolved.matchedWayId, confidence: resolved.confidence, headingCompatible: true }
+            : null;
+          roadStateBySegment.current.set(
+            open.segmentId,
+            updateRoadState(roadStateBySegment.current.get(open.segmentId), candidate),
+          );
+        }
       }
     }
 
@@ -206,7 +257,25 @@ function AppContent() {
       const displaySegments = fallbackSegments.map(
         (segment) => matchedCacheRef.current.get(segment.segmentId) ?? resolveSegment(null, segment),
       );
-      pushRoute(displaySegments);
+      // Only the currently-open segment's tail is still subject to change; every closed segment is
+      // matched at most once (see refreshLiveMatching above) and renders fully committed. Splitting
+      // just the open segment's coordinates keeps the historical line from visibly jumping every
+      // refresh tick (section 30) while the live tail can still be revised.
+      const openSegmentId = fallbackSegments.at(-1)?.segmentId;
+      const routeEntries = displaySegments.flatMap((segment) => {
+        if (segment.segmentId !== openSegmentId) {
+          return [{ segmentType: segment.segmentType, coordinates: segment.coordinates, tentative: false }];
+        }
+        const { committedCoordinates, tentativeCoordinates } = splitCommittedTentative(
+          segment.coordinates, roadStateBySegment.current.get(segment.segmentId),
+        );
+        const entries = [];
+        if (committedCoordinates.length >= 2) entries.push({ segmentType: segment.segmentType, coordinates: committedCoordinates, tentative: false });
+        if (tentativeCoordinates.length >= 2) entries.push({ segmentType: segment.segmentType, coordinates: tentativeCoordinates, tentative: true });
+        if (!entries.length) entries.push({ segmentType: segment.segmentType, coordinates: segment.coordinates, tentative: true });
+        return entries;
+      });
+      pushRoute(routeEntries);
 
       const latest = rows
         .filter((row) => row.trajectory_decision === 'ACCEPTED' && row.is_live_fresh && row.filtered_latitude != null)
@@ -245,28 +314,44 @@ function AppContent() {
       }
 
     if (Platform.OS === 'android') {
-      try {
-        await IntentLauncher.startActivityAsync(
-          'android.settings.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS',
-          { data: 'package:com.raahmitra.gpslogger' }
-        );
-      } catch (err) {
-        console.error('battery optimization exemption request failed', err);
+      // Only launch these system screens once (on cold start with no prior grant/decision).
+      // Re-launching the battery-optimization settings activity on every start() briefly
+      // backgrounds the app; when the exemption is already granted, Android finishes that
+      // activity almost instantly, and starting the location foreground service right after
+      // can race Android's "not allowed to start foreground service while in background" check.
+      const batteryOptRequested = await AsyncStorage.getItem(BATTERY_OPT_REQUESTED_KEY);
+      if (!batteryOptRequested) {
+        try {
+          await IntentLauncher.startActivityAsync(
+            'android.settings.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS',
+            { data: 'package:com.raahmitra.gpslogger' }
+          );
+        } catch (err) {
+          console.error('battery optimization exemption request failed', err);
+        }
+        await AsyncStorage.setItem(BATTERY_OPT_REQUESTED_KEY, '1');
+        await waitForAppActive();
       }
 
-      try {
-        await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.READ_PHONE_STATE);
-      } catch (err) {
-        console.error('READ_PHONE_STATE request failed', err);
+      const hasPhoneState = await PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.READ_PHONE_STATE);
+      if (!hasPhoneState) {
+        try {
+          await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.READ_PHONE_STATE);
+        } catch (err) {
+          console.error('READ_PHONE_STATE request failed', err);
+        }
+        await waitForAppActive();
       }
     }
 
     const profileName = 'MOVING_NORMAL';
-    const profile = TRACKING_PROFILES[profileName];
+    const profile = getPollingProfile(trackingMode, profileName);
     const accuracy = Location.Accuracy[profile.accuracy] || Location.Accuracy.Highest;
     const alreadyRunning = await Location.hasStartedLocationUpdatesAsync(LOCATION_TASK_NAME);
     const previousProfile = await AsyncStorage.getItem(ACTIVE_PROFILE_KEY);
+    const previousMode = await AsyncStorage.getItem(TRACKING_MODE_KEY);
     await AsyncStorage.setItem(ACTIVE_PROFILE_KEY, profileName);
+    await AsyncStorage.setItem(TRACKING_MODE_KEY, trackingMode);
     if (!alreadyRunning) await Location.startLocationUpdatesAsync(LOCATION_TASK_NAME, {
       accuracy,
       timeInterval: profile.timeIntervalMs,
@@ -274,16 +359,17 @@ function AppContent() {
       showsBackgroundLocationIndicator: true,
       foregroundService: {
         notificationTitle: 'RaahMitra GPS logger',
-        notificationBody: `Logging with ${profileName} profile`,
+        notificationBody: `Logging ${trackingMode} with ${profileName} profile`,
       },
     });
-    if (previousProfile !== profileName || !alreadyRunning) {
+    if (previousProfile !== profileName || previousMode !== trackingMode || !alreadyRunning) {
       await logEvent('polling_settings_changed', {
         profile: profileName,
+        tracking_mode: trackingMode,
         accuracy: profile.accuracy,
         time_interval_ms: profile.timeIntervalMs,
         distance_interval_m: profile.distanceIntervalM,
-        algorithm_version: PROCESSING_CONFIG.algorithmVersion,
+        algorithm_version: getTrackingProfile(trackingMode).algorithmVersion,
       });
     }
       await recordHeartbeat('start_tracking');
@@ -303,7 +389,7 @@ function AppContent() {
       const [rawRows, processedRows] = await Promise.all([getAllRawLocations(), getAllProcessedLocations()]);
       const rawById = new Map(rawRows.map((row) => [row.id, row]));
       const rows = processedRows.map((row) => ({ ...rawById.get(row.raw_fix_id), ...row }));
-      const matched = await matchWalkingSequence(rows, { endpoint: MATCHER_ENDPOINT });
+      const matched = await matchSequenceChunked(rows, { endpoint: MATCHER_ENDPOINT, mode: sessionModeFromRows(rawRows, trackingMode) });
       await updateMatchDiagnostics(collectMatchDiagnostics(matched));
       matchedCacheRef.current = new Map(matched.map((segment) => [segment.segmentId, segment]));
       pushRoute(matched);
@@ -339,12 +425,14 @@ function AppContent() {
       const [rawLocations, processedLocations] = await Promise.all([
         getAllRawLocations(), getAllProcessedLocations(),
       ]);
+      const exportedMode = sessionModeFromRows(rawLocations, trackingMode);
       const payload = {
-        schema_version: '2.0',
-        algorithm_version: PROCESSING_CONFIG.algorithmVersion,
+        schema_version: '2.1',
+        algorithm_version: getTrackingProfile(exportedMode).algorithmVersion,
         matcher_version: MATCHER_VERSION,
+        tracking_mode: exportedMode,
         exported_at: new Date().toISOString(),
-        configuration: { profiles: TRACKING_PROFILES, processing: PROCESSING_CONFIG },
+        configuration: { pollingProfiles: POLLING_PROFILES, modeProfiles: MODE_PROFILES, base: BASE_PROCESSING_CONFIG },
         session_stats: sessionStats,
         logs,
         raw_locations: rawLocations,
@@ -370,7 +458,7 @@ function AppContent() {
       const [rawRows, processedRows] = await Promise.all([getAllRawLocations(), getAllProcessedLocations()]);
       const rawById = new Map(rawRows.map((row) => [row.id, row]));
       const rows = processedRows.map((row) => ({ ...rawById.get(row.raw_fix_id), ...row }));
-      const matchedSegments = await matchWalkingSequence(rows, { endpoint: MATCHER_ENDPOINT });
+      const matchedSegments = await matchSequence(rows, { endpoint: MATCHER_ENDPOINT, mode: sessionModeFromRows(rawRows, trackingMode) });
       const diagnosticsByRawFixId = new Map(collectMatchDiagnostics(matchedSegments).map((d) => [d.raw_fix_id, d]));
       const points = rows
         .filter((row) => row.is_route_point && row.trajectory_decision === 'ACCEPTED')
@@ -437,7 +525,23 @@ function AppContent() {
         onLoadEnd={onWebViewLoadEnd}
       />
       <View style={[styles.panel, { paddingBottom: styles.panel.paddingBottom + insets.bottom }]}>
-        <Text style={styles.title}>RaahMitra walking route</Text>
+        <Text style={styles.title}>RaahMitra {trackingMode === TRACKING_MODES.BIKE ? 'cycling' : 'walking'} route</Text>
+        <View style={styles.modeRow}>
+          <Pressable
+            disabled={running}
+            style={[styles.modeButton, trackingMode === TRACKING_MODES.WALK && styles.modeButtonActive, running && styles.modeButtonDisabled]}
+            onPress={() => setTrackingMode(TRACKING_MODES.WALK)}
+          >
+            <Text style={[styles.modeButtonText, trackingMode === TRACKING_MODES.WALK && styles.modeButtonTextActive]}>Walking</Text>
+          </Pressable>
+          <Pressable
+            disabled={running}
+            style={[styles.modeButton, trackingMode === TRACKING_MODES.BIKE && styles.modeButtonActive, running && styles.modeButtonDisabled]}
+            onPress={() => setTrackingMode(TRACKING_MODES.BIKE)}
+          >
+            <Text style={[styles.modeButtonText, trackingMode === TRACKING_MODES.BIKE && styles.modeButtonTextActive]}>Cycling</Text>
+          </Pressable>
+        </View>
         <Text style={styles.status}>{running ? 'RUNNING' : 'STOPPED'}</Text>
         <View style={styles.countRow}>
           <Text style={styles.count}>Raw: {rawCount}</Text>
@@ -489,4 +593,10 @@ const styles = StyleSheet.create({
   title: { fontSize: 18, fontWeight: '600', marginBottom: 4, textAlign: 'center' },
   status: { fontSize: 22, fontWeight: 'bold' },
   count: { fontSize: 18 },
+  modeRow: { flexDirection: 'row', gap: 8, marginBottom: 8 },
+  modeButton: { flex: 1, minHeight: 38, borderRadius: 8, justifyContent: 'center', alignItems: 'center', backgroundColor: '#eaf2f6', borderWidth: 1, borderColor: '#c7d7e0' },
+  modeButtonActive: { backgroundColor: '#1687d9', borderColor: '#1687d9' },
+  modeButtonDisabled: { opacity: 0.5 },
+  modeButtonText: { color: '#1687d9', fontSize: 14, fontWeight: '700' },
+  modeButtonTextActive: { color: '#fff' },
 });

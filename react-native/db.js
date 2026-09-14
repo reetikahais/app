@@ -19,6 +19,7 @@ export function getDb() {
         CREATE TABLE IF NOT EXISTS raw_locations (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           tracking_session_id TEXT,
+          tracking_mode TEXT,
           fix_timestamp_ms INTEGER NOT NULL,
           received_timestamp_ms INTEGER NOT NULL,
           fix_age_ms INTEGER,
@@ -80,9 +81,19 @@ export function getDb() {
           gap_duration_ms INTEGER,
           matched_way_id TEXT,
           distance_from_matched_path_m REAL,
+          turn_detected INTEGER,
+          acceleration_mps2 REAL,
+          stationary_anchor_latitude REAL,
+          stationary_anchor_longitude REAL,
           created_at TEXT NOT NULL
         );
       `);
+      const rawColumns = await db.getAllAsync('PRAGMA table_info(raw_locations)');
+      const rawExisting = new Set(rawColumns.map((col) => col.name));
+      const addRawColumn = async (name, type) => {
+        if (!rawExisting.has(name)) await db.execAsync(`ALTER TABLE raw_locations ADD COLUMN ${name} ${type};`);
+      };
+      await addRawColumn('tracking_mode', 'TEXT');
       const columns = await db.getAllAsync('PRAGMA table_info(logs)');
       const existing = new Set(columns.map((col) => col.name));
       const addColumn = async (name, type) => {
@@ -126,6 +137,10 @@ export function getDb() {
       await addProcessedColumn('gap_duration_ms', 'INTEGER');
       await addProcessedColumn('matched_way_id', 'TEXT');
       await addProcessedColumn('distance_from_matched_path_m', 'REAL');
+      await addProcessedColumn('turn_detected', 'INTEGER');
+      await addProcessedColumn('acceleration_mps2', 'REAL');
+      await addProcessedColumn('stationary_anchor_latitude', 'REAL');
+      await addProcessedColumn('stationary_anchor_longitude', 'REAL');
       await db.execAsync('CREATE INDEX IF NOT EXISTS raw_locations_session_time ON raw_locations(tracking_session_id, fix_timestamp_ms);');
       await db.execAsync('CREATE INDEX IF NOT EXISTS processed_locations_raw_fix ON processed_locations(raw_fix_id);');
       return db;
@@ -167,7 +182,7 @@ export async function insertLog(row) {
 }
 
 const RAW_COLUMNS = [
-  'tracking_session_id', 'fix_timestamp_ms', 'received_timestamp_ms', 'fix_age_ms', 'elapsed_realtime_ns',
+  'tracking_session_id', 'tracking_mode', 'fix_timestamp_ms', 'received_timestamp_ms', 'fix_age_ms', 'elapsed_realtime_ns',
   'batch_id', 'batch_index', 'latitude', 'longitude', 'horizontal_accuracy_m', 'altitude_m',
   'vertical_accuracy_m', 'speed_mps', 'speed_accuracy_mps', 'bearing_deg', 'bearing_accuracy_deg',
   'provider', 'method', 'is_mock', 'app_state', 'battery_pct', 'motion_activity', 'step_count',
@@ -196,8 +211,9 @@ export async function insertLocationBatch(rawRows, processedRows) {
           route_segment_type, matcher_version, raw_to_filtered_m, gap_duration_ms, trajectory_decision, trajectory_reason,
           distance_from_last_accepted_m, elapsed_time_ms, implied_speed_mps, reported_speed_mps,
           recent_median_speed_mps, bearing, bearing_change, accepted_reference_latitude,
-          accepted_reference_longitude, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)` ,
+          accepted_reference_longitude, turn_detected, acceleration_mps2, stationary_anchor_latitude,
+          stationary_anchor_longitude, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)` ,
         [result.lastInsertRowId, processed.tracking_session_id ?? null, processed.algorithm_version,
           processed.processing_status, processed.processing_reason, processed.filtered_latitude,
           processed.filtered_longitude, processed.predicted_latitude, processed.predicted_longitude,
@@ -214,6 +230,8 @@ export async function insertLocationBatch(rawRows, processedRows) {
           processed.implied_speed_mps ?? null, processed.reported_speed_mps ?? null,
           processed.recent_median_speed_mps ?? null, processed.bearing ?? null, processed.bearing_change ?? null,
           processed.accepted_reference_latitude ?? null, processed.accepted_reference_longitude ?? null,
+          processed.turn_detected ?? null, processed.acceleration_mps2 ?? null,
+          processed.stationary_anchor_latitude ?? null, processed.stationary_anchor_longitude ?? null,
           processed.created_at],
       );
     }

@@ -1,5 +1,13 @@
 const { haversineMeters } = require('./processing');
-const { MAP_MATCH_CONFIDENCE, MATCHER_VERSION } = require('./trackingConfig');
+const { MAP_MATCH_CONFIDENCE, MATCHER_VERSION, MATCHER_PROFILE_BY_MODE, TRACKING_MODES } = require('./trackingConfig');
+const { buildTraceWindows, stitchWindowResults } = require('./traceBuffer');
+
+// allowed_highways per Valhalla costing profile (section 34): pedestrian stays footway-first;
+// bicycle adds the road classes cyclists actually use while still excluding motorway/trunk.
+const ALLOWED_HIGHWAYS_BY_MODE = Object.freeze({
+  [TRACKING_MODES.WALK]: ['footway', 'path', 'pedestrian', 'track', 'steps', 'residential', 'service'],
+  [TRACKING_MODES.BIKE]: ['cycleway', 'path', 'track', 'residential', 'service', 'unclassified', 'tertiary', 'secondary', 'primary'],
+});
 
 function pointCoordinate(row) {
   return {
@@ -118,11 +126,12 @@ function resolveSegment(matchedSegment, fallbackSegment) {
 }
 
 /**
- * Adapter for a self-hosted pedestrian matcher (Valhalla-compatible trace-route response).
+ * Adapter for a self-hosted matcher (Valhalla-compatible trace-route response), mode-aware since
+ * a bike trace must be matched against bicycle costing/allowed_highways, not pedestrian ones.
  * No endpoint configured, or a failed/unreachable request, resolves every segment through the
  * fallback path — matcher absence must never stop GPS tracking or route display (section 37).
  */
-async function matchWalkingSequence(rows, { endpoint, signal } = {}) {
+async function matchSequence(rows, { endpoint, signal, mode = TRACKING_MODES.WALK } = {}) {
   const fallbackSegments = buildGpsRouteSegments(rows);
   if (!endpoint || rows.length < 2) {
     return fallbackSegments.map((segment) => resolveSegment(null, segment));
@@ -133,16 +142,16 @@ async function matchWalkingSequence(rows, { endpoint, signal } = {}) {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
-        profile: 'pedestrian',
+        profile: MATCHER_PROFILE_BY_MODE[mode] || MATCHER_PROFILE_BY_MODE[TRACKING_MODES.WALK],
         points: rows.map((row) => ({
           ...pointCoordinate(row), timestamp: row.fix_timestamp_ms, accuracy: row.accuracy,
           bearing: row.bearing, speed: row.implied_speed_mps,
-          // Without this, a server has no way to know where one contiguous walked segment ends
-          // and the next begins — the client itself only reconstructs that boundary from
+          // Without this, a server has no way to know where one contiguous walked/ridden segment
+          // ends and the next begins — the client itself only reconstructs that boundary from
           // segment_id (see buildGpsRouteSegments above), so the request must carry the same value.
           segmentId: Number(row.segment_id ?? 0),
         })),
-        allowed_highways: ['footway', 'path', 'pedestrian', 'track', 'steps', 'residential', 'service'],
+        allowed_highways: ALLOWED_HIGHWAYS_BY_MODE[mode] || ALLOWED_HIGHWAYS_BY_MODE[TRACKING_MODES.WALK],
       }),
       signal,
     });
@@ -153,6 +162,52 @@ async function matchWalkingSequence(rows, { endpoint, signal } = {}) {
   }
   const matchedById = new Map((matchedSegments || []).map((segment) => [segment.segmentId, segment]));
   return fallbackSegments.map((segment) => resolveSegment(matchedById.get(segment.segmentId) || null, segment));
+}
+
+// Sections 15-16: for a segment long enough that sending it as one matcher call would be slow/heavy
+// (a long bike ride), split it into overlapping windows, match each independently, and stitch the
+// results back into one segment. Short segments (the common case: a walk, or most bike rides) go
+// through the single-call matchSequence path unchanged — this only changes behavior once a segment
+// actually exceeds chunkThreshold points.
+async function matchSequenceChunked(rows, {
+  endpoint, signal, mode = TRACKING_MODES.WALK, chunkThreshold = 40, windowSize = 25, overlapSize = 5,
+} = {}) {
+  const fallbackSegments = buildGpsRouteSegments(rows);
+  const rowsByRawFixId = new Map(rows.map((row) => [row.raw_fix_id ?? row.id, row]));
+  const resolved = [];
+  for (const segment of fallbackSegments) {
+    const segRows = segment.rawFixIds.map((id) => rowsByRawFixId.get(id)).filter(Boolean);
+    if (segRows.length <= chunkThreshold) {
+      const [single] = await matchSequence(segRows, { endpoint, signal, mode });
+      resolved.push(single);
+      continue;
+    }
+    const windows = buildTraceWindows(segRows, { windowSize, overlapSize });
+    const windowResolved = [];
+    for (const window of windows) {
+      const [windowSegment] = await matchSequence(window, { endpoint, signal, mode });
+      windowResolved.push(windowSegment);
+    }
+    const stitched = stitchWindowResults(windowResolved);
+    const anyMatched = windowResolved.some((w) => w?.segmentType === 'MAP_MATCHED');
+    const pointDiagnosticsByRawFixId = new Map();
+    for (const windowSegment of windowResolved) {
+      for (const diag of windowSegment?.pointDiagnostics || []) {
+        if (diag.rawFixId != null && !pointDiagnosticsByRawFixId.has(diag.rawFixId)) {
+          pointDiagnosticsByRawFixId.set(diag.rawFixId, diag);
+        }
+      }
+    }
+    resolved.push({
+      segmentId: segment.segmentId,
+      segmentType: anyMatched ? 'MAP_MATCHED' : segment.segmentType,
+      confidence: stitched?.confidence ?? 'UNMATCHED',
+      coordinates: stitched?.coordinates ?? segment.coordinates,
+      matchedWayId: stitched?.matchedWayId ?? null,
+      pointDiagnostics: [...pointDiagnosticsByRawFixId.values()],
+    });
+  }
+  return resolved;
 }
 
 // Per-raw-fix diagnostics for section 42/43 persistence: one row per original accepted GPS
@@ -174,6 +229,6 @@ function collectMatchDiagnostics(segments) {
 }
 
 if (typeof module !== 'undefined') module.exports = {
-  MATCHER_VERSION, buildGpsRouteSegments, matchWalkingSequence,
+  MATCHER_VERSION, buildGpsRouteSegments, matchSequence, matchSequenceChunked,
   classifyConfidence, resolveSegment, normalizeMatchedSegments, collectMatchDiagnostics,
 };

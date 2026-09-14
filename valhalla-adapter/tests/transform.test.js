@@ -61,7 +61,7 @@ test('toValhallaShape re-zeroes time relative to the first point of the segment'
   assert.equal(shape[0].lon, 77.1);
 });
 
-test('buildTraceAttributesRequest uses pedestrian costing and map_snap (never edge_walk)', () => {
+test('buildTraceAttributesRequest defaults to pedestrian costing and map_snap (never edge_walk)', () => {
   const request = buildTraceAttributesRequest([
     { latitude: 31.1, longitude: 77.1, timestamp: 0 },
     { latitude: 31.1001, longitude: 77.1001, timestamp: 5000 },
@@ -69,6 +69,15 @@ test('buildTraceAttributesRequest uses pedestrian costing and map_snap (never ed
   assert.equal(request.costing, 'pedestrian');
   assert.equal(request.shape_match, 'map_snap');
   assert.equal(request.shape.length, 2);
+});
+
+test('buildTraceAttributesRequest forwards bicycle costing for bike traces', () => {
+  const request = buildTraceAttributesRequest([
+    { latitude: 31.1, longitude: 77.1, timestamp: 0 },
+    { latitude: 31.1001, longitude: 77.1001, timestamp: 5000 },
+  ], { costing: 'bicycle' });
+  assert.equal(request.costing, 'bicycle');
+  assert.equal(request.shape_match, 'map_snap');
 });
 
 test('confidenceFromMatchedPoints: tight snapping is HIGH', () => {

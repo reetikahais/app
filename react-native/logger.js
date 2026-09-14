@@ -1,7 +1,7 @@
 import { File, Paths } from 'expo-file-system';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Battery from 'expo-battery';
-import { APP_STATE_KEY, TRACKING_PROFILES } from './trackingConfig';
+import { APP_STATE_KEY, TRACKING_MODE_KEY, TRACKING_MODES, getPollingProfile } from './trackingConfig';
 
 const EVENTS_LOG_FILENAME = 'events.log';
 const HEARTBEAT_KEY = 'last_heartbeat';
@@ -86,9 +86,10 @@ export async function recordHeartbeat(lifecycleEvent) {
 // backgrounds, which is exactly the case this needs to detect.
 export async function checkForMissedShutdown() {
   try {
-    const [lastHeartbeatStr, lastLifecycleEvent] = await Promise.all([
+    const [lastHeartbeatStr, lastLifecycleEvent, lastMode] = await Promise.all([
       AsyncStorage.getItem(HEARTBEAT_KEY),
       AsyncStorage.getItem(LIFECYCLE_KEY),
+      AsyncStorage.getItem(TRACKING_MODE_KEY),
     ]);
 
     if (!lastHeartbeatStr) {
@@ -102,7 +103,8 @@ export async function checkForMissedShutdown() {
     }
 
     const gapMs = Date.now() - Number(lastHeartbeatStr);
-    if (gapMs > KILL_GAP_MULTIPLIER * TRACKING_PROFILES.MOVING_NORMAL.timeIntervalMs) {
+    const pollingProfile = getPollingProfile(lastMode || TRACKING_MODES.WALK, 'MOVING_NORMAL');
+    if (gapMs > KILL_GAP_MULTIPLIER * pollingProfile.timeIntervalMs) {
       await logEvent('app_kill_detected', { reason: 'gap_exceeds_threshold', gap_ms: gapMs });
     }
     await logEvent('app_start', { reason: 'normal' });

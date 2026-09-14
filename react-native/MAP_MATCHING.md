@@ -1,13 +1,15 @@
-# Map matching approach (v2.2.0)
+# Map matching approach (v3.0.0)
 
 ## Decision
 
-**Valhalla's `trace_route`/`trace_attributes` pedestrian mode, self-hosted, called through the
-adapter in `routeMatching.js`.** Not GraphHopper, not OSRM.
+**Valhalla's `trace_route`/`trace_attributes` matching, self-hosted, called through the adapter in
+`routeMatching.js`, with a costing model chosen per RaahMitra tracking mode.** Not GraphHopper, not
+OSRM.
 
 - Valhalla's `costing: pedestrian` already treats `footway`/`path`/`pedestrian`/`track`/`steps`/
   `residential`/`service` correctly and respects `foot=no`/access tags, so section 25 doesn't need
-  a hand-rolled way filter.
+  a hand-rolled way filter. `costing: bicycle` does the equivalent for `cycleway` and the road
+  classes cyclists actually use — see "Mode-aware costing" below.
 - Valhalla's map matching is sequence-based (Viterbi over candidate edges), not nearest-edge
   snapping, which is the specific failure mode section 26 calls out for hillside roads with
   parallel/switchback geometry (New ISBT Shimla / Tutikandi).
@@ -30,6 +32,14 @@ resolves through the GPS-fallback path (`RAW_GPS`/`GAP` segments only) — track
 segmentation, and export all work exactly as before; the app simply doesn't display `MAP_MATCHED`
 geometry yet.
 
+## Mode-aware costing
+
+`matchSequence(rows, { endpoint, mode })` in `routeMatching.js` picks the Valhalla costing model and
+allowed-highways list from `trackingConfig.js`'s `MATCHER_PROFILE_BY_MODE` (`walk` → `pedestrian`,
+`bike` → `bicycle`) and `ALLOWED_HIGHWAYS_BY_MODE`. A bike trace matched against pedestrian-only
+edges (or vice versa) will pick the wrong path — the `profile` field in the request below is never
+hardcoded to `pedestrian` anymore.
+
 ## Adapter contract (`routeMatching.js`)
 
 Request (`POST {MATCHER_ENDPOINT}`):
@@ -40,10 +50,13 @@ Request (`POST {MATCHER_ENDPOINT}`):
   "allowed_highways": ["footway", "path", "pedestrian", "track", "steps", "residential", "service"]
 }
 ```
+(`profile`/`allowed_highways` shown here are the walk-mode values; bike mode sends `"profile":
+"bicycle"` and `ALLOWED_HIGHWAYS_BY_MODE.bike` instead — see "Mode-aware costing" above.)
+
 `segmentId` mirrors the client's own `segment_id` grouping (a new value each time `continuity_decision`
-flips to `GAP`). A server has no other way to know where one contiguous walked run ends and the next
-begins — it must echo this same value back on each response segment (see below) rather than invent
-its own numbering, or the client will fail to line the response up with `fallbackSegments`.
+flips to `GAP`). A server has no other way to know where one contiguous walked/ridden run ends and
+the next begins — it must echo this same value back on each response segment (see below) rather than
+invent its own numbering, or the client will fail to line the response up with `fallbackSegments`.
 
 A reference adapter implementing this contract in front of a self-hosted Valhalla instance lives in
 `valhalla-adapter/` at the repo root — see its README for setup (Docker image, OSM extract, and how
@@ -81,10 +94,24 @@ trusted to already imply the right fallback behavior.
 - **Live** (`App.js`, `refreshLiveMatching`): each closed segment is matched at most once and
   cached; the currently-open segment is rematched on a 10s throttle using only its last 15 accepted
   points. No endpoint configured means this is a cheap no-op every tick.
-- **Final** (`App.js`, `finalizeSession`, run from `stop()`): one full-session match per segment,
-  written back onto `processed_locations` via `db.updateMatchDiagnostics()` (keyed by
-  `raw_fix_id`), without touching any raw column — so a future matcher version or newer OSM extract
-  can redo this from the untouched raw evidence at any time (section 35).
+- **Final** (`App.js`, `finalizeSession`, run from `stop()`): uses `matchSequenceChunked()`, which
+  matches a segment in one call if it's short, or splits it into overlapping windows (`traceBuffer.js`,
+  sections 15-16) and stitches the results back together if it's long (default threshold: 40 points
+  per segment) — so a long bike ride doesn't send one huge trace in a single request. Written back
+  onto `processed_locations` via `db.updateMatchDiagnostics()` (keyed by `raw_fix_id`), without
+  touching any raw column — so a future matcher version or newer OSM extract can redo this from the
+  untouched raw evidence at any time (section 35).
+
+## Road-lock and tentative/committed rendering (`routeConfidence.js`, sections 17-21, 30, 48)
+
+The live map additionally tracks a `MatchedRoadState` per open segment (`matchedWayId`, confidence,
+`consecutiveMatches`) so a single closer-looking candidate on a parallel road can't flip the display —
+switching requires `roadSwitchConfirmationCount` (default 3) consecutive, heading-compatible
+observations of the same new way. `splitCommittedTentative()` uses that state to keep only the
+trailing few points of the open segment "tentative" (redrawn each refresh, rendered lighter/dashed);
+everything before that is "committed" and rendered solid, so the historical line stops visibly
+jumping on every live-refresh tick. Closed segments are always fully committed. This is layered on
+top of `resolveSegment()`'s existing GPS-vs-matched-geometry decision, not a replacement for it.
 
 ## Known limitation
 

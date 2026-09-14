@@ -5,7 +5,7 @@ import { getAllRawLocations, insertLocationBatch } from './db';
 import { logEvent, recordHeartbeat } from './logger';
 import { getSignalInfo } from './signalInfo';
 import { processLocations } from './processing';
-import { ACTIVE_PROFILE_KEY, APP_STATE_KEY, LOCATION_TASK_NAME, PROCESSING_CONFIG } from './trackingConfig';
+import { ACTIVE_PROFILE_KEY, APP_STATE_KEY, LOCATION_TASK_NAME, TRACKING_MODE_KEY, TRACKING_MODES, getTrackingProfile } from './trackingConfig';
 
 export { ACTIVE_PROFILE_KEY, APP_STATE_KEY, LOCATION_TASK_NAME };
 export const LOG_INTERVAL_MS = 5000;
@@ -22,7 +22,7 @@ async function getSessionId() {
 
 function nullable(value) { return Number.isFinite(Number(value)) ? Number(value) : null; }
 
-function toRawRow(location, index, batchId, receivedTimestampMs, appState, batteryPct, signalInfo, sessionId) {
+function toRawRow(location, index, batchId, receivedTimestampMs, appState, batteryPct, signalInfo, sessionId, mode) {
   const coords = location?.coords || {};
   const fixTimestampMs = nullable(location?.timestamp);
   const latitude = nullable(coords.latitude);
@@ -30,6 +30,7 @@ function toRawRow(location, index, batchId, receivedTimestampMs, appState, batte
   if (latitude == null || longitude == null || fixTimestampMs == null) return null;
   return {
     tracking_session_id: sessionId,
+    tracking_mode: mode,
     fix_timestamp_ms: fixTimestampMs,
     received_timestamp_ms: receivedTimestampMs,
     fix_age_ms: Math.max(0, receivedTimestampMs - fixTimestampMs),
@@ -81,19 +82,20 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
     const receivedTimestampMs = Date.now();
     const appState = (await AsyncStorage.getItem(APP_STATE_KEY)) || 'background';
     const profile = (await AsyncStorage.getItem(ACTIVE_PROFILE_KEY)) || 'MOVING_NORMAL';
+    const mode = (await AsyncStorage.getItem(TRACKING_MODE_KEY)) || TRACKING_MODES.WALK;
     const sessionId = await getSessionId();
     const batchId = `batch-${receivedTimestampMs}-${Math.random().toString(36).slice(2, 7)}`;
     const batteryLevel = await Battery.getBatteryLevelAsync().catch(() => -1);
     const signalInfo = await getSignalInfo();
     const rawRows = data.locations
       .map((location, index) => toRawRow(location, index, batchId, receivedTimestampMs, appState,
-        batteryLevel >= 0 ? Math.round(batteryLevel * 100) : null, signalInfo, sessionId))
+        batteryLevel >= 0 ? Math.round(batteryLevel * 100) : null, signalInfo, sessionId, mode))
       .filter(Boolean)
       .sort((a, b) => a.fix_timestamp_ms - b.fix_timestamp_ms || a.batch_index - b.batch_index);
 
     if (rawRows.length) {
       const history = await getAllRawLocations();
-      const processedRows = processLocations([...history, ...rawRows], { ...PROCESSING_CONFIG, nowMs: receivedTimestampMs })
+      const processedRows = processLocations([...history, ...rawRows], { mode, nowMs: receivedTimestampMs })
         .filter((row) => row.batch_id === batchId)
         .map((row) => ({ ...row, tracking_session_id: sessionId, created_at: new Date(receivedTimestampMs).toISOString() }));
       await insertLocationBatch(rawRows, processedRows);
@@ -102,8 +104,9 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
         batch_size: rawRows.length,
         active_profile: profile,
         requested_profile: profile,
+        tracking_mode: mode,
         delivered_interval_ms: processedRows.map((row) => row.interval_ms).filter((value) => value != null),
-        algorithm_version: PROCESSING_CONFIG.algorithmVersion,
+        algorithm_version: getTrackingProfile(mode).algorithmVersion,
       });
     }
   } catch (err) {
