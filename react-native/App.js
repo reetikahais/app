@@ -11,15 +11,19 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { LOCATION_TASK_NAME, APP_STATE_KEY } from './trackingConfig';
 import { countLogs, clearLogs, getAllLogs, getAllRawLocations, getAllProcessedLocations, updateMatchDiagnostics } from './db';
 import {
-  MATCHER_ENDPOINT, ACTIVE_PROFILE_KEY, TRACKING_MODE_KEY, TRACKING_MODES,
-  MODE_PROFILES, BASE_PROCESSING_CONFIG, POLLING_PROFILES, getPollingProfile, getTrackingProfile,
+  MATCHER_ENDPOINT, ACTIVE_PROFILE_KEY, REQUESTED_PROFILE_KEY, TRACKING_MODE_KEY, TRACKING_SESSION_KEY,
+  TRACKING_MODES, MODE_PROFILES, BASE_PROCESSING_CONFIG, POLLING_PROFILES, createSessionId,
+  getPollingProfile, getTrackingProfile, normalizeTrackingMode,
 } from './trackingConfig';
+import { buildLocationTaskOptions } from './locationOptions';
+import { isIgnoringBatteryOptimizations } from './signalInfo';
 import { buildAnimatedMapHtml } from './animatedMapExport';
 import {
   buildGpsRouteSegments, matchSequence, matchSequenceChunked, resolveSegment,
   collectMatchDiagnostics, MATCHER_VERSION,
 } from './routeMatching';
 import { createRoadState, updateRoadState, splitCommittedTentative } from './routeConfidence';
+import { segmentsToRouteJson } from './routeSplit';
 import { computeSessionStats } from './sessionStats';
 import {
   logEvent,
@@ -27,11 +31,25 @@ import {
   checkForMissedShutdown,
   clearEventsLog,
   getAllEvents,
+  getTrackingLifecycle,
 } from './logger';
 
 const LIVE_MATCH_THROTTLE_MS = 10000;
 const LIVE_MATCH_TAIL_POINTS = 15;
-const BATTERY_OPT_REQUESTED_KEY = 'battery_optimization_requested';
+// After a failed attempt to apply a pending polling profile, wait this long before trying again so
+// the 2-second refresh tick doesn't retry (and log) every tick.
+const PROFILE_APPLY_RETRY_MS = 30000;
+
+// Button label -> internal mode value. The visible "Bike" button intentionally maps to the
+// internal value 'motorbike' (motorbike/motorcycle/scooter) — 'bike' is no longer used internally
+// because it was ambiguous between bicycle and motorbike.
+const MODE_BUTTONS = [
+  { value: TRACKING_MODES.WALK, label: 'Walking' },
+  { value: TRACKING_MODES.BICYCLE, label: 'Bicycle' },
+  { value: TRACKING_MODES.MOTORBIKE, label: 'Bike' },
+  { value: TRACKING_MODES.CAR, label: 'Car' },
+];
+const MODE_LABELS = Object.fromEntries(MODE_BUTTONS.map((option) => [option.value, option.label]));
 
 // Android refuses to start a foreground service while the app is backgrounded. Returning from a
 // system settings/permission screen can land here a beat before the app is reported active again,
@@ -84,11 +102,12 @@ window.updateRoute = function (routesJson) {
   routes.forEach((route) => {
     if (route.coordinates.length < 2) return;
     route.coordinates.forEach((coordinate) => bounds.push(coordinate));
+    // Low-confidence stretches (recovery-confirmed / late fixes) draw as their own faded dashed line.
     L.polyline(route.coordinates, {
       color: route.type === 'MAP_MATCHED' ? '#2f8f4e' : (route.type === 'GAP' ? '#9aa5ad' : '#d39b22'),
       weight: route.tentative ? 4 : 5,
-      opacity: route.type === 'GAP' ? 0.5 : (route.tentative ? 0.55 : 0.9),
-      dashArray: route.type === 'GAP' ? '8 8' : (route.tentative ? '4 6' : null)
+      opacity: route.lowConfidence ? 0.4 : (route.type === 'GAP' ? 0.5 : (route.tentative ? 0.55 : 0.9)),
+      dashArray: route.lowConfidence ? '2 8' : (route.type === 'GAP' ? '8 8' : (route.tentative ? '4 6' : null))
     }).addTo(routeLayer);
   });
   if (routes[0] && routes[0].coordinates[0]) L.marker(routes[0].coordinates[0]).addTo(routeLayer).bindPopup('Start');
@@ -125,15 +144,18 @@ window.updateLive = function (lat, lng, accuracyM) {
 // recorded rows are the source of truth; the current picker state is only a fallback for an
 // empty/legacy session.
 function sessionModeFromRows(rawRows, fallbackMode) {
-  return rawRows.find((row) => row.tracking_mode)?.tracking_mode || fallbackMode;
+  const stored = rawRows.find((row) => row.tracking_mode)?.tracking_mode;
+  return normalizeTrackingMode(stored) || fallbackMode;
 }
 
-function segmentsToRouteJson(segments) {
-  return JSON.stringify(segments.map((segment) => ({
-    type: segment.segmentType,
-    coordinates: segment.coordinates.map((point) => [point.latitude, point.longitude]),
-    tentative: Boolean(segment.tentative),
-  })));
+// Effective mode drives Valhalla costing (a session that escalated bicycle -> motorbike should be
+// matched against motorcycle-appropriate roads, not bicycle-only ones) — use the most recent
+// processed row's effective_mode, since that reflects how the trip actually ended up moving.
+// Older sessions/rows recorded before this column existed simply fall back to the selected mode.
+function sessionEffectiveModeFromRows(processedRows, fallbackMode) {
+  const sorted = [...processedRows].filter((row) => row.effective_mode)
+    .sort((a, b) => Number(a.raw_fix_id ?? 0) - Number(b.raw_fix_id ?? 0));
+  return sorted.at(-1)?.effective_mode || fallbackMode;
 }
 
 export default function App() {
@@ -162,7 +184,111 @@ function AppContent() {
   const lastLiveMatchAt = useRef(0);
   const pendingRouteJson = useRef(null);
   const pendingLive = useRef(null);
+  const trackingModeRef = useRef(TRACKING_MODES.WALK);
+  trackingModeRef.current = trackingMode;
+  // The mount effect's listeners are created once; they call the latest start() through this ref.
+  const startRef = useRef(null);
+  const applyingProfile = useRef(false);
+  const lastProfileApplyFailureAt = useRef(0);
+  const lostAlertOpen = useRef(false);
   const mapHtml = useMemo(() => buildLiveMapShellHtml(), []);
+
+  // The background task only REQUESTS a polling profile change (it can't start a foreground service
+  // from the background). Apply it here while the app is in the foreground. startLocationUpdatesAsync
+  // on an already-running task just updates its options in place (expo-task-manager registerTask ->
+  // setOptions), so there is deliberately no stopLocationUpdatesAsync first: a stop that succeeded
+  // followed by a start that failed is exactly what killed tracking on the 22 Sept 2026 ride.
+  async function applyPendingPollingProfile() {
+    if (applyingProfile.current) return;
+    if (Date.now() - lastProfileApplyFailureAt.current < PROFILE_APPLY_RETRY_MS) return;
+    applyingProfile.current = true;
+    try {
+      if (!(await Location.hasStartedLocationUpdatesAsync(LOCATION_TASK_NAME))) return;
+      const [activeProfile, requestedProfile, storedMode] = await Promise.all([
+        AsyncStorage.getItem(ACTIVE_PROFILE_KEY),
+        AsyncStorage.getItem(REQUESTED_PROFILE_KEY),
+        AsyncStorage.getItem(TRACKING_MODE_KEY),
+      ]);
+      if (!requestedProfile || requestedProfile === activeProfile) return;
+      const mode = normalizeTrackingMode(storedMode) || TRACKING_MODES.WALK;
+      try {
+        await Location.startLocationUpdatesAsync(LOCATION_TASK_NAME, buildLocationTaskOptions(mode, requestedProfile));
+        await AsyncStorage.setItem(ACTIVE_PROFILE_KEY, requestedProfile);
+        await logEvent('polling_profile_changed', {
+          from_profile: activeProfile,
+          to_profile: requestedProfile,
+          tracking_mode: mode,
+          reason: 'applied_in_foreground',
+        });
+      } catch (err) {
+        lastProfileApplyFailureAt.current = Date.now();
+        console.error('Applying pending polling profile failed', err);
+        await logEvent('error', {
+          reason: 'polling_profile_apply_failed',
+          message: String(err?.message ?? err),
+          from_profile: activeProfile,
+          attempted_profile: requestedProfile,
+        });
+      }
+    } catch (err) {
+      console.error('applyPendingPollingProfile failed', err);
+    } finally {
+      applyingProfile.current = false;
+    }
+  }
+
+  // Silent-death detection: the app last recorded "start_tracking" but the OS no longer has the
+  // location task registered (service killed, start rejected, reboot...). Tell the user instead of
+  // leaving a screen that looks idle, and offer to resume.
+  async function checkTrackingLost() {
+    // Claimed synchronously, before the first await, so the mount call and the 'active' event
+    // (which can fire together) can never both get past this point. Released in `finally` on every
+    // path except the one where the alert is actually shown (its buttons release it then).
+    if (lostAlertOpen.current) return;
+    lostAlertOpen.current = true;
+    let alertShown = false;
+    try {
+      const started = await Location.hasStartedLocationUpdatesAsync(LOCATION_TASK_NAME);
+      setRunning(started);
+      if (started) return;
+      const { lastHeartbeatMs, lastLifecycleEvent } = await getTrackingLifecycle();
+      if (lastLifecycleEvent !== 'start_tracking') return;
+      const lastSeen = lastHeartbeatMs ? new Date(lastHeartbeatMs) : null;
+      await logEvent('tracking_lost_detected', {
+        last_heartbeat_ms: lastHeartbeatMs,
+        last_heartbeat_iso: lastSeen ? lastSeen.toISOString() : null,
+      });
+      const storedMode = normalizeTrackingMode(await AsyncStorage.getItem(TRACKING_MODE_KEY));
+      Alert.alert(
+        'Tracking stopped',
+        `Tracking stopped at ${lastSeen ? lastSeen.toLocaleTimeString() : 'an unknown time'}. Resume?`,
+        [
+          {
+            text: 'Not now',
+            style: 'cancel',
+            onPress: () => {
+              lostAlertOpen.current = false;
+              // Marks tracking as intentionally stopped so this prompt doesn't repeat.
+              recordHeartbeat('stop_tracking');
+            },
+          },
+          {
+            text: 'Resume',
+            onPress: () => {
+              lostAlertOpen.current = false;
+              startRef.current?.(storedMode || undefined);
+            },
+          },
+        ],
+        { onDismiss: () => { lostAlertOpen.current = false; } },
+      );
+      alertShown = true;
+    } catch (err) {
+      console.error('checkTrackingLost failed', err);
+    } finally {
+      if (!alertShown) lostAlertOpen.current = false;
+    }
+  }
 
   function pushRoute(segments) {
     const json = segmentsToRouteJson(segments);
@@ -197,12 +323,22 @@ function AppContent() {
         next === 'active' ? 'foreground' : 'background'
       );
       logEvent(next === 'active' ? 'app_foreground' : 'app_background');
+      if (next === 'active') {
+        applyPendingPollingProfile();
+        checkTrackingLost();
+      }
     });
 
-    Location.hasStartedLocationUpdatesAsync(LOCATION_TASK_NAME).then(setRunning);
-    AsyncStorage.getItem(TRACKING_MODE_KEY).then((stored) => {
-      if (stored === TRACKING_MODES.WALK || stored === TRACKING_MODES.BIKE) setTrackingMode(stored);
+    Location.hasStartedLocationUpdatesAsync(LOCATION_TASK_NAME).then(setRunning).catch((err) => {
+      console.error('hasStartedLocationUpdatesAsync failed', err);
+      logEvent('error', { reason: 'has_started_check_failed', message: String(err?.message ?? err) });
     });
+    AsyncStorage.getItem(TRACKING_MODE_KEY).then((stored) => {
+      const normalized = normalizeTrackingMode(stored);
+      if (normalized) setTrackingMode(normalized);
+    });
+    applyPendingPollingProfile();
+    checkTrackingLost();
 
     // Bounded live map matching (section 36): only the tail of the currently open segment is
     // (re)matched, on a throttle, and each closed segment is matched at most once. No endpoint
@@ -277,16 +413,36 @@ function AppContent() {
       });
       pushRoute(routeEntries);
 
+      // is_live_fresh reflects delivery latency (fix_age_ms), not whether this is the newest known
+      // position — background location delivery routinely batches/delays fixes past
+      // freshThresholdMs, which used to make every accepted point fail this gate and leave the
+      // live marker stuck/missing even while the route line and counters kept updating normally.
+      // The marker should always show the chronologically latest accepted position, fresh or not.
       const latest = rows
-        .filter((row) => row.trajectory_decision === 'ACCEPTED' && row.is_live_fresh && row.filtered_latitude != null)
+        .filter((row) => row.trajectory_decision === 'ACCEPTED' && row.filtered_latitude != null)
         .sort((a, b) => Number(b.fix_timestamp_ms) - Number(a.fix_timestamp_ms))[0];
       if (latest && Number(latest.fix_timestamp_ms) >= latestLiveTimestamp.current) {
         latestLiveTimestamp.current = Number(latest.fix_timestamp_ms);
         pushLive(Number(latest.filtered_latitude), Number(latest.filtered_longitude), Number(latest.horizontal_accuracy_m ?? latest.accuracy ?? 0));
       }
     }
-    refreshMap();
-    const interval = setInterval(refreshMap, 2000);
+    // A refresh reads both full tables; if one is still running when the next tick fires, skip the
+    // tick instead of stacking a second run on top of it.
+    let refreshingMap = false;
+    const refreshMapSafely = () => {
+      if (refreshingMap) return;
+      refreshingMap = true;
+      refreshMap()
+        .catch((err) => console.error('refreshMap failed', err))
+        .finally(() => { refreshingMap = false; });
+    };
+    refreshMapSafely();
+    const interval = setInterval(() => {
+      refreshMapSafely();
+      // The app can stay in the foreground the whole time, so no 'active' transition will fire:
+      // pick up a pending polling-profile request on this tick as well.
+      if (appState.current === 'active') applyPendingPollingProfile();
+    }, 2000);
 
     return () => {
       sub.remove();
@@ -294,7 +450,44 @@ function AppContent() {
     };
   }, []);
 
-  async function start() {
+  // Tell the user (once per START) when the app isn't exempt from battery optimization. Runs AFTER
+  // tracking has started and never blocks it: opening the settings screen backgrounds the app, and
+  // starting the foreground service from the background is exactly what Android rejects.
+  async function promptBatteryOptimizationIfNeeded() {
+    if (Platform.OS !== 'android') return;
+    const exempt = await isIgnoringBatteryOptimizations();
+    if (exempt !== false) return; // true = already exempt, null = can't tell: don't nag.
+    await logEvent('battery_optimization_not_exempt');
+    Alert.alert(
+      'Allow background tracking',
+      'Battery optimization can stop RaahMitra from logging while the screen is off or the app is in the background. Allow it to run unrestricted in Android settings for reliable tracking.',
+      [
+        { text: 'Not now', style: 'cancel' },
+        { text: 'Open settings', onPress: openBatteryOptimizationSettings },
+      ],
+    );
+  }
+
+  async function openBatteryOptimizationSettings() {
+    try {
+      await IntentLauncher.startActivityAsync(
+        'android.settings.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS',
+        { data: 'package:com.raahmitra.gpslogger' },
+      );
+    } catch (err) {
+      console.error('battery optimization exemption request failed', err);
+      try {
+        await IntentLauncher.startActivityAsync('android.settings.IGNORE_BATTERY_OPTIMIZATION_SETTINGS');
+      } catch (fallbackErr) {
+        console.error('battery optimization settings screen failed', fallbackErr);
+      }
+    }
+  }
+
+  async function start(modeOverride) {
+    // Called both from the START button (no argument) and from the "Resume?" prompt, which passes
+    // the mode tracking was last started with.
+    const mode = normalizeTrackingMode(modeOverride) || trackingModeRef.current;
     try {
       const servicesEnabled = await Location.hasServicesEnabledAsync();
       if (!servicesEnabled) {
@@ -313,74 +506,51 @@ function AppContent() {
         return;
       }
 
-    if (Platform.OS === 'android') {
-      // Only launch these system screens once (on cold start with no prior grant/decision).
-      // Re-launching the battery-optimization settings activity on every start() briefly
-      // backgrounds the app; when the exemption is already granted, Android finishes that
-      // activity almost instantly, and starting the location foreground service right after
-      // can race Android's "not allowed to start foreground service while in background" check.
-      const batteryOptRequested = await AsyncStorage.getItem(BATTERY_OPT_REQUESTED_KEY);
-      if (!batteryOptRequested) {
-        try {
-          await IntentLauncher.startActivityAsync(
-            'android.settings.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS',
-            { data: 'package:com.raahmitra.gpslogger' }
-          );
-        } catch (err) {
-          console.error('battery optimization exemption request failed', err);
+      if (Platform.OS === 'android') {
+        const hasPhoneState = await PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.READ_PHONE_STATE);
+        if (!hasPhoneState) {
+          try {
+            await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.READ_PHONE_STATE);
+          } catch (err) {
+            console.error('READ_PHONE_STATE request failed', err);
+          }
+          await waitForAppActive();
         }
-        await AsyncStorage.setItem(BATTERY_OPT_REQUESTED_KEY, '1');
-        await waitForAppActive();
       }
 
-      const hasPhoneState = await PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.READ_PHONE_STATE);
-      if (!hasPhoneState) {
-        try {
-          await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.READ_PHONE_STATE);
-        } catch (err) {
-          console.error('READ_PHONE_STATE request failed', err);
-        }
-        await waitForAppActive();
+      const profileName = 'MOVING_NORMAL';
+      const profile = getPollingProfile(mode, profileName);
+      const alreadyRunning = await Location.hasStartedLocationUpdatesAsync(LOCATION_TASK_NAME);
+      const previousMode = await AsyncStorage.getItem(TRACKING_MODE_KEY);
+      await AsyncStorage.setItem(TRACKING_MODE_KEY, mode);
+      if (!alreadyRunning) {
+        await AsyncStorage.setItem(ACTIVE_PROFILE_KEY, profileName);
+        await AsyncStorage.setItem(REQUESTED_PROFILE_KEY, profileName);
+        // Every START is a new session: the background task only processes its own session's rows.
+        await AsyncStorage.setItem(TRACKING_SESSION_KEY, createSessionId());
+        await Location.startLocationUpdatesAsync(LOCATION_TASK_NAME, buildLocationTaskOptions(mode, profileName));
       }
-    }
-
-    const profileName = 'MOVING_NORMAL';
-    const profile = getPollingProfile(trackingMode, profileName);
-    const accuracy = Location.Accuracy[profile.accuracy] || Location.Accuracy.Highest;
-    const alreadyRunning = await Location.hasStartedLocationUpdatesAsync(LOCATION_TASK_NAME);
-    const previousProfile = await AsyncStorage.getItem(ACTIVE_PROFILE_KEY);
-    const previousMode = await AsyncStorage.getItem(TRACKING_MODE_KEY);
-    await AsyncStorage.setItem(ACTIVE_PROFILE_KEY, profileName);
-    await AsyncStorage.setItem(TRACKING_MODE_KEY, trackingMode);
-    if (!alreadyRunning) await Location.startLocationUpdatesAsync(LOCATION_TASK_NAME, {
-      accuracy,
-      timeInterval: profile.timeIntervalMs,
-      distanceInterval: profile.distanceIntervalM,
-      showsBackgroundLocationIndicator: true,
-      foregroundService: {
-        notificationTitle: 'RaahMitra GPS logger',
-        notificationBody: `Logging ${trackingMode} with ${profileName} profile`,
-      },
-    });
-    if (previousProfile !== profileName || previousMode !== trackingMode || !alreadyRunning) {
-      await logEvent('polling_settings_changed', {
-        profile: profileName,
-        tracking_mode: trackingMode,
-        accuracy: profile.accuracy,
-        time_interval_ms: profile.timeIntervalMs,
-        distance_interval_m: profile.distanceIntervalM,
-        algorithm_version: getTrackingProfile(trackingMode).algorithmVersion,
-      });
-    }
+      if (!alreadyRunning || previousMode !== mode) {
+        await logEvent('polling_settings_changed', {
+          profile: profileName,
+          tracking_mode: mode,
+          accuracy: profile.accuracy,
+          time_interval_ms: profile.timeIntervalMs,
+          distance_interval_m: profile.distanceIntervalM,
+          algorithm_version: getTrackingProfile(mode).algorithmVersion,
+        });
+      }
       await recordHeartbeat('start_tracking');
+      setTrackingMode(mode);
       setRunning(true);
+      promptBatteryOptimizationIfNeeded().catch((err) => console.error('battery optimization prompt failed', err));
     } catch (err) {
       await logEvent('error', { reason: 'start_tracking_failed', message: String(err?.message ?? err) });
       Alert.alert('Tracking could not start', String(err?.message ?? err));
       setRunning(false);
     }
   }
-
+  startRef.current = start;
   // Section 36/39: on stop, run one full-session map-matching pass (not the bounded live
   // window) and persist the outcome back onto processed_locations by raw_fix_id. Raw evidence
   // is never rewritten, so a future matcher/OSM version can redo this from scratch.
@@ -389,7 +559,9 @@ function AppContent() {
       const [rawRows, processedRows] = await Promise.all([getAllRawLocations(), getAllProcessedLocations()]);
       const rawById = new Map(rawRows.map((row) => [row.id, row]));
       const rows = processedRows.map((row) => ({ ...rawById.get(row.raw_fix_id), ...row }));
-      const matched = await matchSequenceChunked(rows, { endpoint: MATCHER_ENDPOINT, mode: sessionModeFromRows(rawRows, trackingMode) });
+      const selectedMode = sessionModeFromRows(rawRows, trackingMode);
+      const matchMode = sessionEffectiveModeFromRows(processedRows, selectedMode);
+      const matched = await matchSequenceChunked(rows, { endpoint: MATCHER_ENDPOINT, mode: matchMode });
       await updateMatchDiagnostics(collectMatchDiagnostics(matched));
       matchedCacheRef.current = new Map(matched.map((segment) => [segment.segmentId, segment]));
       pushRoute(matched);
@@ -407,12 +579,25 @@ function AppContent() {
   }
 
   async function stop() {
-    await Location.stopLocationUpdatesAsync(LOCATION_TASK_NAME);
+    try {
+      // Only stop a task that is registered: stopLocationUpdatesAsync throws TaskNotFoundException
+      // otherwise (e.g. the OS already dropped it), which must not leave the UI stuck on RUNNING.
+      if (await Location.hasStartedLocationUpdatesAsync(LOCATION_TASK_NAME)) {
+        await Location.stopLocationUpdatesAsync(LOCATION_TASK_NAME);
+      }
+    } catch (err) {
+      console.error('Stopping location updates failed', err);
+      await logEvent('error', { reason: 'stop_tracking_failed', message: String(err?.message ?? err) });
+      const stillRunning = await Location.hasStartedLocationUpdatesAsync(LOCATION_TASK_NAME).catch(() => false);
+      if (stillRunning) {
+        Alert.alert('Could not stop tracking', String(err?.message ?? err));
+        return;
+      }
+    }
     await recordHeartbeat('stop_tracking');
     setRunning(false);
     await finalizeSession();
   }
-
   async function exportLogs() {
     try {
       const canShare = await Sharing.isAvailableAsync();
@@ -426,11 +611,23 @@ function AppContent() {
         getAllRawLocations(), getAllProcessedLocations(),
       ]);
       const exportedMode = sessionModeFromRows(rawLocations, trackingMode);
+      const effectiveMode = sessionEffectiveModeFromRows(processedLocations, exportedMode);
+      // Section 25: every mode_switch_event recorded during processing, in order, so a viewer can
+      // see exactly when/why the effective mode escalated or downgraded during this trip.
+      const modeSwitches = processedLocations
+        .filter((row) => row.mode_switch_event)
+        .sort((a, b) => Number(a.raw_fix_id ?? 0) - Number(b.raw_fix_id ?? 0))
+        .map((row) => ({
+          at_fix_id: row.raw_fix_id, event: row.mode_switch_event, effective_mode: row.effective_mode,
+        }));
       const payload = {
         schema_version: '2.1',
         algorithm_version: getTrackingProfile(exportedMode).algorithmVersion,
         matcher_version: MATCHER_VERSION,
         tracking_mode: exportedMode,
+        user_selected_mode: exportedMode,
+        effective_mode: effectiveMode,
+        mode_switches: modeSwitches,
         exported_at: new Date().toISOString(),
         configuration: { pollingProfiles: POLLING_PROFILES, modeProfiles: MODE_PROFILES, base: BASE_PROCESSING_CONFIG },
         session_stats: sessionStats,
@@ -458,7 +655,9 @@ function AppContent() {
       const [rawRows, processedRows] = await Promise.all([getAllRawLocations(), getAllProcessedLocations()]);
       const rawById = new Map(rawRows.map((row) => [row.id, row]));
       const rows = processedRows.map((row) => ({ ...rawById.get(row.raw_fix_id), ...row }));
-      const matchedSegments = await matchSequence(rows, { endpoint: MATCHER_ENDPOINT, mode: sessionModeFromRows(rawRows, trackingMode) });
+      const selectedMode = sessionModeFromRows(rawRows, trackingMode);
+      const matchMode = sessionEffectiveModeFromRows(processedRows, selectedMode);
+      const matchedSegments = await matchSequence(rows, { endpoint: MATCHER_ENDPOINT, mode: matchMode });
       const diagnosticsByRawFixId = new Map(collectMatchDiagnostics(matchedSegments).map((d) => [d.raw_fix_id, d]));
       const points = rows
         .filter((row) => row.is_route_point && row.trajectory_decision === 'ACCEPTED')
@@ -469,12 +668,24 @@ function AppContent() {
             longitude: diag?.map_matched_longitude ?? row.filtered_longitude ?? row.longitude,
             timestamp: row.fix_timestamp_ms,
             routeType: diag?.route_segment_type ?? row.route_segment_type ?? 'RAW_GPS',
+            trajectoryReason: row.trajectory_reason,
           };
         });
+      // Section 27: surface rejected/high-speed/recovery fixes too, not just the accepted route,
+      // so the debug viewer can show why a point was excluded or specially handled.
+      const markers = rows
+        .filter((row) => ['HIGH_SPEED_CONTINUITY_ACCEPT', 'RECOVERY_CONFIRMED'].includes(row.trajectory_reason)
+          || row.trajectory_decision === 'OUTLIER')
+        .map((row) => ({
+          latitude: row.filtered_latitude ?? row.latitude,
+          longitude: row.filtered_longitude ?? row.longitude,
+          timestamp: row.fix_timestamp_ms,
+          reason: row.trajectory_decision === 'OUTLIER' ? 'HARD_OUTLIER' : row.trajectory_reason,
+        }));
       const file = new File(Paths.document, 'raahmitra_animated_route.html');
       if (file.exists) file.delete();
       file.create();
-      file.write(buildAnimatedMapHtml(matchedSegments, points));
+      file.write(buildAnimatedMapHtml(matchedSegments, points, `RaahMitra ${MODE_LABELS[selectedMode] || 'GPS'} route`, markers));
       await Sharing.shareAsync(file.uri, { mimeType: 'text/html', dialogTitle: 'Export animated map' });
     } catch (err) {
       console.error('Animated map export failed', err);
@@ -525,22 +736,19 @@ function AppContent() {
         onLoadEnd={onWebViewLoadEnd}
       />
       <View style={[styles.panel, { paddingBottom: styles.panel.paddingBottom + insets.bottom }]}>
-        <Text style={styles.title}>RaahMitra {trackingMode === TRACKING_MODES.BIKE ? 'cycling' : 'walking'} route</Text>
+        <Text style={styles.title}>RaahMitra {MODE_LABELS[trackingMode] || 'Walking'} route</Text>
+        <Text style={styles.sectionLabel}>Choose Activity</Text>
         <View style={styles.modeRow}>
-          <Pressable
-            disabled={running}
-            style={[styles.modeButton, trackingMode === TRACKING_MODES.WALK && styles.modeButtonActive, running && styles.modeButtonDisabled]}
-            onPress={() => setTrackingMode(TRACKING_MODES.WALK)}
-          >
-            <Text style={[styles.modeButtonText, trackingMode === TRACKING_MODES.WALK && styles.modeButtonTextActive]}>Walking</Text>
-          </Pressable>
-          <Pressable
-            disabled={running}
-            style={[styles.modeButton, trackingMode === TRACKING_MODES.BIKE && styles.modeButtonActive, running && styles.modeButtonDisabled]}
-            onPress={() => setTrackingMode(TRACKING_MODES.BIKE)}
-          >
-            <Text style={[styles.modeButtonText, trackingMode === TRACKING_MODES.BIKE && styles.modeButtonTextActive]}>Cycling</Text>
-          </Pressable>
+          {MODE_BUTTONS.map((option) => (
+            <Pressable
+              key={option.value}
+              disabled={running}
+              style={[styles.modeButton, trackingMode === option.value && styles.modeButtonActive, running && styles.modeButtonDisabled]}
+              onPress={() => setTrackingMode(option.value)}
+            >
+              <Text style={[styles.modeButtonText, trackingMode === option.value && styles.modeButtonTextActive]}>{option.label}</Text>
+            </Pressable>
+          ))}
         </View>
         <Text style={styles.status}>{running ? 'RUNNING' : 'STOPPED'}</Text>
         <View style={styles.countRow}>
@@ -556,7 +764,7 @@ function AppContent() {
           </View>
         ) : null}
         <View style={styles.buttonGrid}>
-          <Pressable style={[styles.actionButton, styles.startButton]} onPress={running ? stop : start}>
+          <Pressable style={[styles.actionButton, styles.startButton]} onPress={running ? stop : () => start()}>
             <Text style={styles.actionText}>{running ? 'STOP LOGGING' : 'START LOGGING'}</Text>
           </Pressable>
           <Pressable style={[styles.actionButton, styles.exportButton]} onPress={exportLogs}>
@@ -593,8 +801,9 @@ const styles = StyleSheet.create({
   title: { fontSize: 18, fontWeight: '600', marginBottom: 4, textAlign: 'center' },
   status: { fontSize: 22, fontWeight: 'bold' },
   count: { fontSize: 18 },
-  modeRow: { flexDirection: 'row', gap: 8, marginBottom: 8 },
-  modeButton: { flex: 1, minHeight: 38, borderRadius: 8, justifyContent: 'center', alignItems: 'center', backgroundColor: '#eaf2f6', borderWidth: 1, borderColor: '#c7d7e0' },
+  sectionLabel: { fontSize: 13, fontWeight: '600', color: '#5b6b74', marginBottom: 6, textAlign: 'center' },
+  modeRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 8 },
+  modeButton: { width: '48%', minHeight: 38, borderRadius: 8, justifyContent: 'center', alignItems: 'center', backgroundColor: '#eaf2f6', borderWidth: 1, borderColor: '#c7d7e0' },
   modeButtonActive: { backgroundColor: '#1687d9', borderColor: '#1687d9' },
   modeButtonDisabled: { opacity: 0.5 },
   modeButtonText: { color: '#1687d9', fontSize: 14, fontWeight: '700' },

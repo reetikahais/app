@@ -81,6 +81,25 @@ export async function recordHeartbeat(lifecycleEvent) {
   }
 }
 
+// What the app last recorded about tracking: App.js compares this with the OS-side task state to
+// notice tracking that should be running but is not.
+export async function getTrackingLifecycle() {
+  try {
+    const [heartbeatStr, lastLifecycleEvent] = await Promise.all([
+      AsyncStorage.getItem(HEARTBEAT_KEY),
+      AsyncStorage.getItem(LIFECYCLE_KEY),
+    ]);
+    const heartbeatMs = Number(heartbeatStr);
+    return {
+      lastHeartbeatMs: heartbeatStr && Number.isFinite(heartbeatMs) ? heartbeatMs : null,
+      lastLifecycleEvent,
+    };
+  } catch (err) {
+    console.error('getTrackingLifecycle failed', err);
+    return { lastHeartbeatMs: null, lastLifecycleEvent: null };
+  }
+}
+
 // Heartbeat piggybacks on locationTask's per-fix write (recordHeartbeat call there) —
 // no separate JS timer, since a JS-owned interval would get suspended when the app
 // backgrounds, which is exactly the case this needs to detect.

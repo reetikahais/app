@@ -1,12 +1,15 @@
 const { haversineMeters } = require('./processing');
-const { MAP_MATCH_CONFIDENCE, MATCHER_VERSION, MATCHER_PROFILE_BY_MODE, TRACKING_MODES } = require('./trackingConfig');
+const { MAP_MATCH_CONFIDENCE, MATCHER_VERSION, MATCHER_PROFILE_BY_MODE, TRACKING_MODES, getTrackingProfile, normalizeTrackingMode } = require('./trackingConfig');
 const { buildTraceWindows, stitchWindowResults } = require('./traceBuffer');
 
 // allowed_highways per Valhalla costing profile (section 34): pedestrian stays footway-first;
-// bicycle adds the road classes cyclists actually use while still excluding motorway/trunk.
+// bicycle adds the road classes cyclists actually use while still excluding motorway/trunk;
+// motorbike/car add motorway/trunk since both can legally use highways a bicycle cannot.
 const ALLOWED_HIGHWAYS_BY_MODE = Object.freeze({
   [TRACKING_MODES.WALK]: ['footway', 'path', 'pedestrian', 'track', 'steps', 'residential', 'service'],
-  [TRACKING_MODES.BIKE]: ['cycleway', 'path', 'track', 'residential', 'service', 'unclassified', 'tertiary', 'secondary', 'primary'],
+  [TRACKING_MODES.BICYCLE]: ['cycleway', 'path', 'track', 'residential', 'service', 'unclassified', 'tertiary', 'secondary', 'primary'],
+  [TRACKING_MODES.MOTORBIKE]: ['residential', 'service', 'unclassified', 'tertiary', 'secondary', 'primary', 'trunk', 'motorway'],
+  [TRACKING_MODES.CAR]: ['residential', 'service', 'unclassified', 'tertiary', 'secondary', 'primary', 'trunk', 'motorway'],
 });
 
 function pointCoordinate(row) {
@@ -14,6 +17,17 @@ function pointCoordinate(row) {
     latitude: Number(row.filtered_latitude ?? row.latitude),
     longitude: Number(row.filtered_longitude ?? row.longitude),
   };
+}
+
+// Drawn dashed/faded: a fix confirmed only through multi-point recovery, or one whose own accuracy is
+// worse than the mode's acceptable ceiling. A late-delivered fix (HISTORICAL_ACCEPTED, so
+// position_confidence 'LOW') with good accuracy is a normal fix and stays solid.
+function isLowConfidenceRow(row) {
+  if (row.trajectory_reason === 'RECOVERY_CONFIRMED') return true;
+  const accuracy = Number(row.horizontal_accuracy_m ?? row.accuracy);
+  if (!Number.isFinite(accuracy)) return false;
+  const mode = row.effective_mode || row.tracking_mode || row.user_selected_mode;
+  return accuracy > getTrackingProfile(mode).maxAcceptableAccuracyMeters;
 }
 
 function buildGpsRouteSegments(rows) {
@@ -37,7 +51,10 @@ function buildGpsRouteSegments(rows) {
       if (row.continuity_decision === 'GAP' && segment.coordinates.length) {
         segment.segmentType = 'GAP';
       }
-      segment.coordinates.push(pointCoordinate(row));
+      // Flag only when true so every other coordinate keeps its exact {latitude, longitude} shape.
+      segment.coordinates.push(isLowConfidenceRow(row)
+        ? { ...pointCoordinate(row), lowConfidence: true }
+        : pointCoordinate(row));
       segment.rawFixIds.push(row.raw_fix_id ?? row.id ?? null);
       grouped.set(segmentId, segment);
     });
@@ -132,6 +149,10 @@ function resolveSegment(matchedSegment, fallbackSegment) {
  * fallback path — matcher absence must never stop GPS tracking or route display (section 37).
  */
 async function matchSequence(rows, { endpoint, signal, mode = TRACKING_MODES.WALK } = {}) {
+  // Legacy sessions/callers may still pass 'bike' (pre four-mode split) — resolve it to 'bicycle'
+  // the same way trackingConfig.getTrackingProfile does, so old trips still get bicycle costing
+  // instead of silently falling back to pedestrian.
+  mode = normalizeTrackingMode(mode) || TRACKING_MODES.WALK;
   const fallbackSegments = buildGpsRouteSegments(rows);
   if (!endpoint || rows.length < 2) {
     return fallbackSegments.map((segment) => resolveSegment(null, segment));

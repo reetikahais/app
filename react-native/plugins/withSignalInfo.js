@@ -7,6 +7,7 @@ const MODULE_KT = `package __PACKAGE__
 import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Build
+import android.os.PowerManager
 import android.telephony.TelephonyManager
 import androidx.core.content.ContextCompat
 import com.facebook.react.bridge.Arguments
@@ -19,6 +20,16 @@ class SignalInfoModule(reactContext: ReactApplicationContext) :
   ReactContextBaseJavaModule(reactContext) {
 
   override fun getName() = "SignalInfo"
+
+  @ReactMethod
+  fun isIgnoringBatteryOptimizations(promise: Promise) {
+    try {
+      val pm = reactApplicationContext.getSystemService(PowerManager::class.java)
+      promise.resolve(pm?.isIgnoringBatteryOptimizations(reactApplicationContext.packageName) ?: false)
+    } catch (e: Exception) {
+      promise.reject("battery_optimization_error", e.message, e)
+    }
+  }
 
   @ReactMethod
   fun getSignalInfo(promise: Promise) {

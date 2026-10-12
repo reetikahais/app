@@ -56,6 +56,20 @@ function bearingBetween(from, to) {
       * Math.cos(radians(to.longitude - from.longitude));
   return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
 }
+// Android's fused provider reports speed 0, bearing 0 and no speed accuracy for fixes it derived
+// from Wi-Fi/cell rather than GNSS: it has no speed for them, it is not saying the device is
+// stationary. This is only the "looks like a placeholder" half of the test; callers also require
+// evidence of real movement (implied speed above the mode's stationary speed) before ignoring it.
+function isZeroSpeedPlaceholder(fix) {
+  return fix.speed_mps === 0
+    && (fix.bearing_deg == null || fix.bearing_deg === 0)
+    && fix.speed_accuracy_mps == null;
+}
+
+// Recovery chains of poor-accuracy fixes are judged on a looser progress ratio than clean GNSS
+// chains (their legs are mostly noise), but must still travel farther than their own accuracy.
+const LOW_ACCURACY_RECOVERY_RATIO_FACTOR = 0.75;
+
 function angleDifference(a, b) {
   const difference = Math.abs(a - b) % 360;
   return difference > 180 ? 360 - difference : difference;
@@ -159,8 +173,62 @@ function updateMovement(previous, fix, elapsedMs, displacementM, config, evidenc
   return previous || 'UNKNOWN';
 }
 
+// Section 15/16: advance the effective tracking mode for the NEXT fix based on how this accepted
+// fix's rolling median speed behaved. Escalation only ever climbs the walk -> bicycle -> motorbike
+// ladder (never past motorbike into car — that would need real activity-recognition evidence this
+// app doesn't have) and downgrade never drops below the user's own original selection (`floorMode`).
+// Evidence accumulators are frozen (not reset, not advanced) while the fix is stationary-ish, so a
+// traffic-light stop can never itself cause a downgrade (section 23).
+function stepAdaptiveMode(effectiveMode, floorMode, medianSpeedMps, elapsedMs, evidence, isStationaryish) {
+  const { ADAPTIVE_MODE_RANK: rank, ADAPTIVE_MODE_RULES: rules, TRACKING_MODES: MODES } = require('./trackingConfig');
+  if (isStationaryish || medianSpeedMps == null || !Number.isFinite(elapsedMs)) {
+    return { effectiveMode, reason: null };
+  }
+  const floorRank = rank[floorMode] ?? rank[MODES.WALK];
+  if (effectiveMode === MODES.WALK) {
+    const rule = rules.WALK_TO_BICYCLE;
+    evidence.upMs = medianSpeedMps > rule.upSpeedMps ? evidence.upMs + elapsedMs : 0;
+    if (evidence.upMs >= rule.upDurationMs) {
+      evidence.upMs = 0;
+      return { effectiveMode: MODES.BICYCLE, reason: 'PROFILE_ESCALATED' };
+    }
+    return { effectiveMode, reason: null };
+  }
+  if (effectiveMode === MODES.BICYCLE) {
+    const upRule = rules.BICYCLE_TO_MOTORBIKE;
+    evidence.upMs = medianSpeedMps > upRule.upSpeedMps ? evidence.upMs + elapsedMs : 0;
+    if (evidence.upMs >= upRule.upDurationMs) {
+      evidence.upMs = 0; evidence.downMs = 0;
+      return { effectiveMode: MODES.MOTORBIKE, reason: 'PROFILE_ESCALATED' };
+    }
+    if (floorRank < rank[MODES.BICYCLE]) {
+      const downRule = rules.WALK_TO_BICYCLE;
+      evidence.downMs = medianSpeedMps < downRule.downSpeedMps ? evidence.downMs + elapsedMs : 0;
+      if (evidence.downMs >= downRule.downDurationMs) {
+        evidence.downMs = 0;
+        return { effectiveMode: MODES.WALK, reason: 'PROFILE_DOWNGRADED' };
+      }
+    }
+    return { effectiveMode, reason: null };
+  }
+  if (effectiveMode === MODES.MOTORBIKE && floorRank < rank[MODES.MOTORBIKE]) {
+    const downRule = rules.BICYCLE_TO_MOTORBIKE;
+    evidence.downMs = medianSpeedMps < downRule.downSpeedMps ? evidence.downMs + elapsedMs : 0;
+    if (evidence.downMs >= downRule.downDurationMs) {
+      evidence.downMs = 0;
+      return { effectiveMode: MODES.BICYCLE, reason: 'PROFILE_DOWNGRADED' };
+    }
+  }
+  // CAR (and MOTORBIKE once at its floor) never changes automatically.
+  return { effectiveMode, reason: null };
+}
+
 function processLocations(rawLocations, options = {}) {
-  const config = { ...require('./trackingConfig').getTrackingProfile(options.mode || 'walk'), ...options };
+  const trackingConfig = require('./trackingConfig');
+  const userSelectedMode = trackingConfig.normalizeTrackingMode(options.userSelectedMode || options.mode)
+    || trackingConfig.TRACKING_MODES.WALK;
+  let effectiveMode = userSelectedMode;
+  const modeEvidence = { upMs: 0, downMs: 0 };
   const normalized = rawLocations.map((fix) => normalizeFix(fix, options.nowMs || Date.now()))
     .filter((fix) => fix.latitude != null && fix.longitude != null && fix.fix_timestamp_ms != null)
     .sort((a, b) => a.fix_timestamp_ms - b.fix_timestamp_ms);
@@ -179,10 +247,17 @@ function processLocations(rawLocations, options = {}) {
   let segmentId = 0;
   let stationaryAnchor = null;
   let consecutiveUncertainCount = 0;
+  let consecutiveOutlierCount = 0;
+  let recoveryCandidates = [];
   const results = [];
   const seen = [];
 
   normalized.forEach((fix, index) => {
+    // Recomputed every fix (not hoisted) because effectiveMode can escalate/downgrade mid-session
+    // (section 15/16) — once it does, all downstream thresholds must immediately reflect the new
+    // profile, not the one the session started with. `options` still wins over the profile so
+    // existing per-call overrides (tests, callers) behave exactly as before.
+    const config = { ...trackingConfig.getTrackingProfile(effectiveMode), ...options };
     const local = toLocalMeters(fix.latitude, fix.longitude, origin);
     const elapsedMs = previousRaw ? fix.fix_timestamp_ms - previousRaw.fix_timestamp_ms : null;
     const intervalMs = elapsedMs == null ? null : Math.max(0, elapsedMs);
@@ -198,13 +273,22 @@ function processLocations(rawLocations, options = {}) {
     const acceptedElapsedSeconds = acceptedElapsedMs > 0 ? acceptedElapsedMs / 1000 : null;
     const previousDistance = lastAcceptedFix ? haversineMeters(lastAcceptedFix.latitude, lastAcceptedFix.longitude, fix.latitude, fix.longitude) : 0;
     const impliedSpeed = acceptedElapsedSeconds ? previousDistance / acceptedElapsedSeconds : null;
-    const reportedSpeed = fix.speed_mps != null && fix.speed_mps >= 0 ? fix.speed_mps : null;
+    const reportedSpeedRaw = fix.speed_mps != null && fix.speed_mps >= 0 ? fix.speed_mps : null;
+    // Reported speed becomes UNKNOWN (null) when it is the zero-speed placeholder AND the position
+    // clearly moved faster than the mode's stationary speed since the last accepted point. SPEED_MISMATCH
+    // and the speed-agreement checks then fall back to implied speed vs plausible/burst speed.
+    const reportedSpeedUnavailable = Boolean(config.treatZeroSpeedAsUnknown)
+      && reportedSpeedRaw === 0 && isZeroSpeedPlaceholder(fix)
+      && impliedSpeed != null && impliedSpeed > config.stationarySpeedMps;
+    const reportedSpeed = reportedSpeedUnavailable ? null : reportedSpeedRaw;
     const recentMedianSpeed = median(acceptedSpeeds);
     const calculatedBearing = lastAcceptedFix && previousDistance > 1 ? bearingBetween(lastAcceptedFix, fix) : null;
     // Device-reported heading is blended in (weighted by headingImportance) only when the calculated
     // bearing already exists — it refines a real bearing estimate, it never substitutes for one, since
     // a stale/parked heading value is common and must not fabricate motion direction on its own.
-    const deviceHeading = fix.bearing_deg != null && (fix.bearing_accuracy_deg == null || fix.bearing_accuracy_deg <= 45)
+    // A placeholder bearing of 0 (north) from a speed-less fix is not a heading either.
+    const deviceHeading = !reportedSpeedUnavailable && fix.bearing_deg != null
+      && (fix.bearing_accuracy_deg == null || fix.bearing_accuracy_deg <= 45)
       ? fix.bearing_deg : null;
     const currentBearing = calculatedBearing != null && deviceHeading != null
       ? blendAngles(calculatedBearing, deviceHeading, config.headingImportance)
@@ -244,7 +328,21 @@ function processLocations(rawLocations, options = {}) {
     } else if (impliedSpeed != null && impliedSpeed > config.extremePhysicalSpeedMps) {
       trajectoryDecision = 'OUTLIER'; trajectoryReason = 'IMPOSSIBLE_SPEED';
     } else if (impliedSpeed != null && previousDistance > maximumPlausibleDistance) {
-      trajectoryDecision = 'OUTLIER'; trajectoryReason = 'EXCESSIVE_DISPLACEMENT';
+      // Section 13/14: a large displacement alone must never be the sole rejection signal. A
+      // delayed GPS sample that covers real ground looks exactly like this on distance alone, but
+      // three independent signals — good accuracy, GPS-reported speed agreeing with the implied
+      // speed, and a stable heading — together are strong evidence the movement is real (we already
+      // know it's within the mode's physical ceiling, since IMPOSSIBLE_SPEED is checked first).
+      const goodAccuracy = fix.accuracy != null && fix.accuracy <= config.preferredAccuracyMeters;
+      const speedAgreementGood = reportedSpeedUnavailable
+        ? impliedSpeed <= config.burstSpeedMps
+        : reportedSpeed != null && Math.abs(impliedSpeed - reportedSpeed) <= config.speedAgreementToleranceMps;
+      const headingStable = bearingChange == null || bearingChange <= 30;
+      if (goodAccuracy && speedAgreementGood && headingStable) {
+        trajectoryDecision = 'ACCEPTED'; trajectoryReason = 'HIGH_SPEED_CONTINUITY_ACCEPT';
+      } else {
+        trajectoryDecision = 'OUTLIER'; trajectoryReason = 'EXCESSIVE_DISPLACEMENT';
+      }
     } else if (impliedSpeed != null && reportedSpeed != null && Math.abs(impliedSpeed - reportedSpeed) > 5) {
       trajectoryDecision = 'UNCERTAIN'; trajectoryReason = 'SPEED_MISMATCH';
     } else if (bearingChange != null && bearingChange > config.bearingPenaltyThresholdDeg && previousDistance > 40 && impliedSpeed > config.plausibleSpeedMps * 1.5) {
@@ -280,7 +378,7 @@ function processLocations(rawLocations, options = {}) {
       trajectoryDecision = 'ACCEPTED';
       trajectoryReason = 'CANDIDATE_CONFIRMED';
     }
-    const accepted = trajectoryDecision === 'ACCEPTED';
+    let accepted = trajectoryDecision === 'ACCEPTED';
     if (accepted) {
       pendingUncertain = null;
     } else if (trajectoryDecision === 'UNCERTAIN' && ['SPEED_MISMATCH', 'BEARING_INCONSISTENCY', 'HIGH_ACCELERATION'].includes(trajectoryReason)) {
@@ -288,6 +386,144 @@ function processLocations(rawLocations, options = {}) {
       // uncertain because of its own poor accuracy (LOW_CONFIDENCE) is not trustworthy enough
       // to anchor a future confirmation, even if a later fix lands close to it.
       pendingUncertain = fix;
+    }
+    // Sections 17-21: multi-point outlier recovery. The single-slot pendingUncertain mechanism
+    // above only recovers a fix that immediately follows one other uncertain fix; it does nothing
+    // once rejection is sustained across several fixes in a row (e.g. no GPS-reported speed to
+    // agree with, or a real turn briefly breaking the single-fix heading check), which is exactly
+    // how a delayed high-speed sample used to lock the rest of the route out forever. Once
+    // rejection looks sustained (maxConsecutiveOutliersBeforeRecovery) or the accepted reference is
+    // simply too old to keep comparing against (stale), buffer the rejected fixes and only ever
+    // compare them to EACH OTHER (candidate-to-candidate), never back to the stale accepted point.
+    // LOW_CONFIDENCE (poor accuracy) rejections are included alongside OUTLIER here: in hilly/
+    // mountainous terrain, sustained bad accuracy is the normal failure mode, not occasional bad
+    // displacement jumps, and it deserves the same "trust the multi-point pattern over any single
+    // reading" treatment — see recoveryMaxAccuracyMeters in trackingConfig.js.
+    let forceReinitState = false;
+    let recoveryState = null;
+    let recoveryLowConfidence = false;
+    const acceptedReferenceIsStale = acceptedElapsedMs != null
+      && acceptedElapsedMs > config.candidateConfirmationWindowMs;
+    const isRecoveryEligibleRejection = trajectoryDecision === 'OUTLIER'
+      || (trajectoryDecision === 'UNCERTAIN' && trajectoryReason === 'LOW_CONFIDENCE')
+      // A stale accepted point must not veto the trip forever: in modes that opt in, any other
+      // uncertain fix measured against a stale reference also feeds the recovery buffer.
+      || (config.lowAccuracyRecovery && acceptedReferenceIsStale
+        && trajectoryDecision === 'UNCERTAIN' && trajectoryReason !== 'INVALID_TIMESTAMP');
+    if (accepted) {
+      consecutiveOutlierCount = 0;
+      recoveryCandidates = [];
+    } else if (isRecoveryEligibleRejection && lastAcceptedFix) {
+      consecutiveOutlierCount += 1;
+      if (consecutiveOutlierCount >= config.maxConsecutiveOutliersBeforeRecovery || acceptedReferenceIsStale) {
+        trajectoryReason = acceptedReferenceIsStale && consecutiveOutlierCount < config.maxConsecutiveOutliersBeforeRecovery
+          ? 'STALE_REFERENCE_RECOVERY' : 'RECOVERY_CANDIDATE';
+        recoveryState = 'RECOVERY_CANDIDATE';
+        recoveryCandidates.push({ fix, resultIndex: results.length });
+        if (recoveryCandidates.length > config.recoveryBufferMaxPoints) {
+          const dropped = recoveryCandidates.shift();
+          const droppedRow = results[dropped.resultIndex];
+          if (droppedRow) droppedRow.trajectory_reason = 'RECOVERY_REJECTED';
+        }
+        if (recoveryCandidates.length >= config.recoveryMinPoints) {
+          const chain = recoveryCandidates.map((candidate) => candidate.fix);
+          // Poor-accuracy chain (hills/terrain/Wi-Fi-cell fixes): individual legs are mostly noise,
+          // so direction reversals between legs shorter than the fixes' own accuracy are ignored
+          // and progress is judged against that accuracy instead (see below).
+          const lowAccuracyChain = Boolean(config.lowAccuracyRecovery)
+            && chain.some((point) => point.accuracy == null || point.accuracy > config.normalAccuracyMaxM);
+          let chainPlausible = true;
+          for (let i = 1; i < chain.length && chainPlausible; i += 1) {
+            const prevPoint = chain[i - 1];
+            const point = chain[i];
+            const dtSec = (point.fix_timestamp_ms - prevPoint.fix_timestamp_ms) / 1000;
+            if (dtSec <= 0) { chainPlausible = false; break; }
+            const legDistance = haversineMeters(prevPoint.latitude, prevPoint.longitude, point.latitude, point.longitude);
+            const legSpeed = legDistance / dtSec;
+            const legReportedSpeedRaw = point.speed_mps != null && point.speed_mps >= 0 ? point.speed_mps : null;
+            const legReportedSpeed = config.treatZeroSpeedAsUnknown && isZeroSpeedPlaceholder(point)
+              && legSpeed > config.stationarySpeedMps ? null : legReportedSpeedRaw;
+            const legSpeedAgreementOk = legReportedSpeed == null
+              || Math.abs(legSpeed - legReportedSpeed) <= config.speedAgreementToleranceMps * 2;
+            const legAccuracyOk = (prevPoint.accuracy ?? Infinity) <= config.recoveryMaxAccuracyMeters
+              && (point.accuracy ?? Infinity) <= config.recoveryMaxAccuracyMeters;
+            if (legSpeed > config.extremePhysicalSpeedMps || !legSpeedAgreementOk || !legAccuracyOk) chainPlausible = false;
+            if (i > 1) {
+              const priorLegDistance = haversineMeters(chain[i - 2].latitude, chain[i - 2].longitude, prevPoint.latitude, prevPoint.longitude);
+              const noiseDominated = lowAccuracyChain
+                && legDistance <= (prevPoint.accuracy ?? 0) + (point.accuracy ?? 0)
+                && priorLegDistance <= (chain[i - 2].accuracy ?? 0) + (prevPoint.accuracy ?? 0);
+              const legBearing = bearingBetween(prevPoint, point);
+              const priorBearing = bearingBetween(chain[i - 2], prevPoint);
+              if (!noiseDominated && angleDifference(legBearing, priorBearing) > config.bearingPenaltyThresholdDeg) chainPlausible = false;
+            }
+          }
+          const chainPositions = chain.map((point) => ({ latitude: point.latitude, longitude: point.longitude }));
+          let { hasProgressiveMovement: chainProgressive } = computeProgressiveMovement(
+            chainPositions,
+            lowAccuracyChain
+              ? { ...config, progressiveMovementMinRatio: config.progressiveMovementMinRatio * LOW_ACCURACY_RECOVERY_RATIO_FACTOR }
+              : config,
+          );
+          if (lowAccuracyChain && chainProgressive) {
+            const meanAccuracyM = chain.reduce((sum, point) => sum + (point.accuracy ?? config.recoveryMaxAccuracyMeters), 0) / chain.length;
+            const { netDisplacementM } = computeProgressiveMovement(chainPositions, config);
+            chainProgressive = netDisplacementM > meanAccuracyM;
+          }
+          if (chainPlausible && chainProgressive) {
+            // RECOVERY_CONFIRMED: promote every buffered candidate to an accepted route point.
+            // Earlier candidates' rows already exist (pushed on a prior iteration) and get their
+            // filtered position reset to their own raw fix — the smoothing filter had no valid
+            // state during the lockout, so predicting from it would just be more stale coordinates.
+            // The current (last) candidate's row does not exist yet; its acceptance is expressed by
+            // flipping trajectoryDecision/trajectoryReason/isRoutePoint below, same as any other
+            // accepted fix reaching the normal push at the end of this iteration.
+            recoveryCandidates.slice(0, -1).forEach((candidate) => {
+              const row = results[candidate.resultIndex];
+              if (!row) return;
+              row.trajectory_decision = 'ACCEPTED';
+              row.trajectory_reason = 'RECOVERY_CONFIRMED';
+              row.is_route_point = 1;
+              row.filtered_latitude = candidate.fix.latitude;
+              row.filtered_longitude = candidate.fix.longitude;
+              row.movement_state = 'MOVING';
+              row.recovery_state = 'RECOVERY_CONFIRMED';
+              if (lowAccuracyChain) {
+                // Confirmed on multi-point agreement alone, never on the fixes' own accuracy: keep
+                // them visibly low confidence and no longer "pending".
+                row.processing_status = row.is_live_fresh ? 'FRESH_ACCEPTED' : 'HISTORICAL_ACCEPTED';
+                row.processing_reason = 'RECOVERY_CONFIRMED';
+                row.position_confidence = 'LOW';
+              }
+            });
+            recoveryLowConfidence = lowAccuracyChain;
+            trajectoryDecision = 'ACCEPTED';
+            trajectoryReason = 'RECOVERY_CONFIRMED';
+            recoveryState = 'RECOVERY_CONFIRMED';
+            accepted = true;
+            forceReinitState = true;
+            // Reseed velocity/bearing/speed history from the recovered trajectory itself (section
+            // 21), not from the stale pre-lockout state — FILTER_RESEEDED_AFTER_RECOVERY.
+            const priorCandidateFix = recoveryCandidates.length > 1
+              ? recoveryCandidates[recoveryCandidates.length - 2].fix : lastAcceptedFix;
+            const reseedDtSec = Math.max((fix.fix_timestamp_ms - priorCandidateFix.fix_timestamp_ms) / 1000, 0.001);
+            const reseedDistance = haversineMeters(priorCandidateFix.latitude, priorCandidateFix.longitude, fix.latitude, fix.longitude);
+            previousAcceptedBearing = bearingBetween(priorCandidateFix, fix);
+            previousAcceptedImpliedSpeed = reseedDistance / reseedDtSec;
+            acceptedSpeeds.length = 0;
+            acceptedSpeeds.push(previousAcceptedImpliedSpeed);
+            // Cleared (not pre-seeded with this fix) so the generic movementWindow construction
+            // below adds it exactly once instead of twice.
+            recentAcceptedPositions.length = 0;
+            movementEvidence.movingMs = config.movingConfirmationMs;
+            movementEvidence.stationaryMs = 0;
+            consecutiveUncertainCount = 0;
+            consecutiveOutlierCount = 0;
+            recoveryCandidates = [];
+            pendingUncertain = null;
+          }
+        }
+      }
     }
     const continuityDecision = gap ? 'GAP' : (isSamplingDelay ? 'SAMPLING_DELAY' : 'CONTINUOUS');
     const gapDurationMs = gap ? acceptedElapsedMs : null;
@@ -312,7 +548,7 @@ function processLocations(rawLocations, options = {}) {
     const turnDetected = accepted && hasProgressiveMovement
       && bearingChange != null && bearingChange > config.turnDetectionThresholdDeg;
     if (accepted) {
-      movementState = updateMovement(movementState, fix, acceptedElapsedMs || 0, previousDistance, config, movementEvidence, hasProgressiveMovement, turnDetected);
+      movementState = updateMovement(movementState, reportedSpeedUnavailable ? { ...fix, speed_mps: null } : fix, acceptedElapsedMs || 0, previousDistance, config, movementEvidence, hasProgressiveMovement, turnDetected);
       consecutiveUncertainCount = 0;
     } else if (trajectoryDecision === 'UNCERTAIN') {
       consecutiveUncertainCount += 1;
@@ -338,6 +574,20 @@ function processLocations(rawLocations, options = {}) {
     // concrete point to draw. Anchor radius/suppression math is unchanged from before for a fix that
     // stays within the noise floor, so walking output is identical; the anchor object itself is new.
     const isStationaryish = movementState === 'STATIONARY' || movementState === 'POSSIBLY_STOPPED';
+    // Section 15/16: decide, from this accepted fix's rolling median speed, whether the effective
+    // mode escalates/downgrades starting with the NEXT fix. The mode this fix itself was validated
+    // under is `effectiveMode` as captured into `config` at the top of this iteration — recorded as
+    // effectiveModeForThisFix so the export always shows which profile actually processed each fix.
+    const effectiveModeForThisFix = effectiveMode;
+    let modeSwitchEvent = null;
+    if (accepted) {
+      const medianForSwitch = median(acceptedSpeeds.length ? acceptedSpeeds : [impliedSpeed].filter(Number.isFinite));
+      const step = stepAdaptiveMode(effectiveMode, userSelectedMode, medianForSwitch, acceptedElapsedMs, modeEvidence, isStationaryish);
+      if (step.effectiveMode !== effectiveMode) {
+        effectiveMode = step.effectiveMode;
+        modeSwitchEvent = step.reason;
+      }
+    }
     if (accepted && isStationaryish && !hasProgressiveMovement) {
       const anchorRadius = Math.max(config.stationaryRadiusMeters, (fix.accuracy || 0) * config.stationaryAccuracyMultiplier);
       if (!stationaryAnchor) {
@@ -360,7 +610,7 @@ function processLocations(rawLocations, options = {}) {
     }
     const measurementVariance = covarianceFor(fix.accuracy);
     const dt = Math.min(Math.max((intervalMs || 0) / 1000, 0), 30);
-    if (accepted && (!stateInitialized || gapCandidate)) {
+    if (accepted && (!stateInitialized || gapCandidate || forceReinitState)) {
       state.east = local.east; state.north = local.north; state.velocityEast = 0; state.velocityNorth = 0; state.variance = measurementVariance;
       stateInitialized = true;
     } else if (lastAcceptedFix && accepted && !gap) {
@@ -396,7 +646,9 @@ function processLocations(rawLocations, options = {}) {
       processing_status: status, processing_reason: reason, filtered_latitude: filtered.latitude,
       filtered_longitude: filtered.longitude, predicted_latitude: filtered.latitude, predicted_longitude: filtered.longitude,
       innovation_m: innovationM, normalized_innovation: innovationM * innovationM / Math.max(measurementVariance, 1),
-      estimated_uncertainty_m: uncertaintyM, position_confidence: status === 'FRESH_ACCEPTED' ? (fix.accuracy <= 20 ? 'HIGH' : 'MEDIUM') : 'LOW',
+      estimated_uncertainty_m: uncertaintyM,
+      position_confidence: recoveryLowConfidence ? 'LOW'
+        : status === 'FRESH_ACCEPTED' ? (fix.accuracy <= 20 ? 'HIGH' : 'MEDIUM') : 'LOW',
       movement_state: movementState, segment_id: segmentId, is_route_point: isRoutePoint,
       continuity_decision: continuityDecision, gap_duration_ms: gapDurationMs,
       route_segment_type: accepted ? (gap ? 'GAP' : 'RAW_GPS') : null,
@@ -417,13 +669,26 @@ function processLocations(rawLocations, options = {}) {
       stationary_anchor_longitude: stationaryAnchor?.longitude ?? null,
       accepted_reference_latitude: lastAcceptedFix?.latitude ?? null,
       accepted_reference_longitude: lastAcceptedFix?.longitude ?? null,
+      user_selected_mode: userSelectedMode, effective_mode: effectiveModeForThisFix,
+      mode_switch_event: modeSwitchEvent, recovery_state: recoveryState,
+      high_speed_override: trajectoryReason === 'HIGH_SPEED_CONTINUITY_ACCEPT' ? 1 : 0,
+      filter_reseeded: forceReinitState ? 1 : 0,
+      speed_agreement_mps: reportedSpeed != null && impliedSpeed != null ? Math.abs(impliedSpeed - reportedSpeed) : null,
+      reported_speed_unavailable: reportedSpeedUnavailable ? 1 : 0,
     });
     if (!duplicate) seen.push(fix);
     if (accepted) {
-      if (impliedSpeed != null && Number.isFinite(impliedSpeed)) acceptedSpeeds.push(impliedSpeed);
-      if (acceptedSpeeds.length > config.recentSpeedHistoryLength) acceptedSpeeds.shift();
-      if (currentBearing != null) previousAcceptedBearing = currentBearing;
-      if (impliedSpeed != null && Number.isFinite(impliedSpeed)) previousAcceptedImpliedSpeed = impliedSpeed;
+      // A recovery-confirmed fix already had its speed/bearing/position history reseeded from the
+      // recovered trajectory itself (section 21) — redoing this bookkeeping here would overwrite
+      // that with numbers measured against the stale pre-lockout reference (the same huge jump that
+      // triggered recovery in the first place), corrupting recentMedianSpeed/bearing for every fix
+      // that follows.
+      if (!forceReinitState) {
+        if (impliedSpeed != null && Number.isFinite(impliedSpeed)) acceptedSpeeds.push(impliedSpeed);
+        if (acceptedSpeeds.length > config.recentSpeedHistoryLength) acceptedSpeeds.shift();
+        if (currentBearing != null) previousAcceptedBearing = currentBearing;
+        if (impliedSpeed != null && Number.isFinite(impliedSpeed)) previousAcceptedImpliedSpeed = impliedSpeed;
+      }
       recentAcceptedPositions.push({ latitude: fix.latitude, longitude: fix.longitude });
       if (recentAcceptedPositions.length > config.progressiveMovementWindowSize) recentAcceptedPositions.shift();
       lastAcceptedFix = fix;
@@ -439,5 +704,5 @@ function routeLength(points, latKey = 'latitude', lonKey = 'longitude') {
 
 if (typeof module !== 'undefined') module.exports = {
   haversineMeters, toLocalMeters, fromLocalMeters, percentile, normalizeFix, processLocations, routeLength,
-  computeProgressiveMovement, bearingBetween, angleDifference, blendAngles,
+  computeProgressiveMovement, bearingBetween, angleDifference, blendAngles, stepAdaptiveMode,
 };

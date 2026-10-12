@@ -51,14 +51,37 @@ function computeElevation(acceptedRows) {
   return { elevationGainM: Math.round(gain * 10) / 10, elevationLossM: Math.round(loss * 10) / 10 };
 }
 
+// A new segment_id starts at every genuine signal gap (processing.js), so the space BETWEEN two
+// consecutive segments is exactly the ground covered while GPS was unavailable — real distance,
+// not an artifact. It's deliberately not drawn as route geometry (the actual path through a
+// blackout on a winding hill road is unknown), but the straight-line distance between the last
+// point before the gap and the first point after it is still a real lower-bound distance, and
+// both endpoints already passed trajectory validation (IMPOSSIBLE_SPEED/EXCESSIVE_DISPLACEMENT
+// ceilings) to become route points at all. Crediting nothing for it — as a pure per-segment sum
+// does — silently drops most of a ride in terrain where GPS gaps are frequent (hills, valleys),
+// which is worse than an underestimate.
+function computeGapBridgeDistanceM(segments) {
+  let total = 0;
+  for (let i = 1; i < segments.length; i += 1) {
+    const previousCoordinates = segments[i - 1].coordinates;
+    const currentCoordinates = segments[i].coordinates;
+    if (!previousCoordinates.length || !currentCoordinates.length) continue;
+    const last = previousCoordinates[previousCoordinates.length - 1];
+    const first = currentCoordinates[0];
+    total += haversineMeters(last.latitude, last.longitude, first.latitude, first.longitude);
+  }
+  return total;
+}
+
 // Prefers high-confidence matched geometry for total distance where available (section 40),
 // falling back to processed GPS geometry per segment otherwise. `segments` are the resolved
 // display segments from routeMatching (routeMatching.resolveSegment output), already excluding
 // OUTLIER/unconfirmed-UNCERTAIN evidence.
 function computeDistanceM(segments) {
-  return segments.reduce((total, segment) => (
+  const withinSegmentDistanceM = segments.reduce((total, segment) => (
     segment.segmentType === 'GAP' ? total : total + routeLength(segment.coordinates)
   ), 0);
+  return withinSegmentDistanceM + computeGapBridgeDistanceM(segments);
 }
 
 function computeSessionStats({ rawRows, processedRows, segments }) {

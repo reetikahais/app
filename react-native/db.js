@@ -1,6 +1,21 @@
 import * as SQLite from 'expo-sqlite';
+import { pairRawWithProcessed } from './taskHelpers';
 
 let dbPromise = null;
+
+// Section 28: the location task and a manual finalize/live-match pass can both want to write at
+// nearly the same moment. expo-sqlite's async API already queues calls on a single connection, but
+// this chain makes the "one writer at a time" guarantee explicit at the call-site level too, so two
+// overlapping withTransactionAsync callers can never observe "cannot start a transaction within a
+// transaction" — each write simply waits for the previous one to fully settle first.
+let writeQueue = Promise.resolve();
+function serializeWrite(fn) {
+  const next = writeQueue.then(fn, fn);
+  // Swallow so one failed write doesn't poison the chain for every write after it; the caller
+  // still sees (and can handle) its own rejection via the returned promise.
+  writeQueue = next.catch(() => {});
+  return next;
+}
 
 export function getDb() {
   if (!dbPromise) {
@@ -141,6 +156,18 @@ export function getDb() {
       await addProcessedColumn('acceleration_mps2', 'REAL');
       await addProcessedColumn('stationary_anchor_latitude', 'REAL');
       await addProcessedColumn('stationary_anchor_longitude', 'REAL');
+      // Four-mode tracking (userSelectedMode vs effectiveTrackingMode) and high-speed/recovery
+      // diagnostics: additive columns only, existing rows simply read back null for these.
+      await addProcessedColumn('user_selected_mode', 'TEXT');
+      await addProcessedColumn('effective_mode', 'TEXT');
+      await addProcessedColumn('mode_switch_event', 'TEXT');
+      await addProcessedColumn('recovery_state', 'TEXT');
+      await addProcessedColumn('high_speed_override', 'INTEGER');
+      await addProcessedColumn('filter_reseeded', 'INTEGER');
+      await addProcessedColumn('speed_agreement_mps', 'REAL');
+      // 1 when the fix reported speed 0 / bearing 0 with no speed accuracy while clearly moving, so
+      // reported speed was ignored for that fix (processing.js) — visible in exports.
+      await addProcessedColumn('reported_speed_unavailable', 'INTEGER');
       await db.execAsync('CREATE INDEX IF NOT EXISTS raw_locations_session_time ON raw_locations(tracking_session_id, fix_timestamp_ms);');
       await db.execAsync('CREATE INDEX IF NOT EXISTS processed_locations_raw_fix ON processed_locations(raw_fix_id);');
       return db;
@@ -189,17 +216,23 @@ const RAW_COLUMNS = [
   'signal_dbm', 'signal_level', 'carrier', 'network_type', 'created_at',
 ];
 
+// Raw and processed rows are paired by (batch_id, batch_index), not by array position. A raw row
+// whose processed counterpart is missing is still inserted (raw evidence is never dropped); the
+// count of those is returned so the caller can log a warning.
 export async function insertLocationBatch(rawRows, processedRows) {
+  const { pairs, unpairedRawCount } = pairRawWithProcessed(rawRows, processedRows);
+  if (unpairedRawCount > 0) {
+    console.warn(`insertLocationBatch: ${unpairedRawCount} raw row(s) have no processed row; inserting raw only`);
+  }
+  await serializeWrite(async () => {
   const db = await getDb();
   await db.withTransactionAsync(async () => {
-    for (let index = 0; index < rawRows.length; index += 1) {
-      const raw = rawRows[index];
+    for (const { raw, processed } of pairs) {
       const rawValues = RAW_COLUMNS.map((column) => raw[column] ?? null);
       const result = await db.runAsync(
         `INSERT INTO raw_locations (${RAW_COLUMNS.join(', ')}) VALUES (${RAW_COLUMNS.map(() => '?').join(', ')})`,
         rawValues
       );
-      const processed = processedRows[index];
       if (!processed) continue;
       await db.runAsync(
         `INSERT INTO processed_locations (
@@ -212,8 +245,10 @@ export async function insertLocationBatch(rawRows, processedRows) {
           distance_from_last_accepted_m, elapsed_time_ms, implied_speed_mps, reported_speed_mps,
           recent_median_speed_mps, bearing, bearing_change, accepted_reference_latitude,
           accepted_reference_longitude, turn_detected, acceleration_mps2, stationary_anchor_latitude,
-          stationary_anchor_longitude, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)` ,
+          stationary_anchor_longitude, user_selected_mode, effective_mode, mode_switch_event,
+          recovery_state, high_speed_override, filter_reseeded, speed_agreement_mps,
+          reported_speed_unavailable, created_at
+        ) VALUES (${Array(53).fill('?').join(', ')})`,
         [result.lastInsertRowId, processed.tracking_session_id ?? null, processed.algorithm_version,
           processed.processing_status, processed.processing_reason, processed.filtered_latitude,
           processed.filtered_longitude, processed.predicted_latitude, processed.predicted_longitude,
@@ -232,10 +267,17 @@ export async function insertLocationBatch(rawRows, processedRows) {
           processed.accepted_reference_latitude ?? null, processed.accepted_reference_longitude ?? null,
           processed.turn_detected ?? null, processed.acceleration_mps2 ?? null,
           processed.stationary_anchor_latitude ?? null, processed.stationary_anchor_longitude ?? null,
+          processed.user_selected_mode ?? null, processed.effective_mode ?? null,
+          processed.mode_switch_event ?? null, processed.recovery_state ?? null,
+          processed.high_speed_override ?? null, processed.filter_reseeded ?? null,
+          processed.speed_agreement_mps ?? null,
+          processed.reported_speed_unavailable ?? null,
           processed.created_at],
       );
     }
   });
+  });
+  return { unpairedRawCount };
 }
 
 // Persists the outcome of a final-session map-matching pass (section 36/39) back onto the
@@ -243,6 +285,7 @@ export async function insertLocationBatch(rawRows, processedRows) {
 // only updates the derived matching columns, so a future matcher/OSM version can freely redo it.
 export async function updateMatchDiagnostics(diagnostics) {
   if (!diagnostics.length) return;
+  return serializeWrite(async () => {
   const db = await getDb();
   await db.withTransactionAsync(async () => {
     for (const diag of diagnostics) {
@@ -258,6 +301,7 @@ export async function updateMatchDiagnostics(diagnostics) {
       );
     }
   });
+  });
 }
 
 export async function getAllLogs() {
@@ -265,9 +309,54 @@ export async function getAllLogs() {
   return db.getAllAsync('SELECT * FROM logs ORDER BY id');
 }
 
-export async function getAllRawLocations() {
+// With a session id, only that session's rows (the background task must not process a new trip
+// against the previous one's history); without one, every row (UI refresh and export).
+export async function getAllRawLocations(sessionId) {
   const db = await getDb();
-  return db.getAllAsync('SELECT * FROM raw_locations ORDER BY fix_timestamp_ms, id');
+  if (sessionId == null) {
+    return db.getAllAsync('SELECT * FROM raw_locations ORDER BY fix_timestamp_ms, id');
+  }
+  return db.getAllAsync(
+    'SELECT * FROM raw_locations WHERE tracking_session_id = ? ORDER BY fix_timestamp_ms, id',
+    [sessionId],
+  );
+}
+
+// The session history the background task reprocesses with each delivery: the larger of the last
+// `minFixes` fixes and every fix since `sinceMs` (same rule as taskHelpers.selectHistoryWindow,
+// which tests/history-window.test.js checks against full-history processing). Ascending order.
+export async function getRecentRawLocations(sessionId, { minFixes, sinceMs }) {
+  const db = await getDb();
+  const sinceTime = await db.getAllAsync(
+    'SELECT * FROM raw_locations WHERE tracking_session_id = ? AND fix_timestamp_ms >= ? ORDER BY fix_timestamp_ms, id',
+    [sessionId, sinceMs],
+  );
+  if (sinceTime.length >= minFixes) return sinceTime;
+  const latest = await db.getAllAsync(
+    'SELECT * FROM raw_locations WHERE tracking_session_id = ? ORDER BY fix_timestamp_ms DESC, id DESC LIMIT ?',
+    [sessionId, minFixes],
+  );
+  return latest.reverse();
+}
+
+// Stored segment_id of an already-processed fix, used to continue segment numbering when only a
+// window of the session is reprocessed. null when that fix has no processed row.
+export async function getSegmentIdForRawFix(rawFixId) {
+  const db = await getDb();
+  const row = await db.getFirstAsync(
+    'SELECT segment_id FROM processed_locations WHERE raw_fix_id = ? ORDER BY id DESC LIMIT 1',
+    [rawFixId],
+  );
+  return row?.segment_id ?? null;
+}
+
+// Fallback anchor for segment re-basing: the newest processed row of the session (one query).
+export async function getNewestProcessedSegment(sessionId) {
+  const db = await getDb();
+  return (await db.getFirstAsync(
+    'SELECT raw_fix_id, segment_id FROM processed_locations WHERE tracking_session_id = ? ORDER BY raw_fix_id DESC, id DESC LIMIT 1',
+    [sessionId],
+  )) ?? null;
 }
 
 export async function getAllProcessedLocations() {
